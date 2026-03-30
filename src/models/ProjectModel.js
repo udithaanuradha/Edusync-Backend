@@ -10,14 +10,23 @@ const getStagesByLevel = (level, callback) => {
         
         const stageIds = stages.map(s => s.stage_id);
         db.query('SELECT * FROM files WHERE stage_id IN (?) ORDER BY uploaded_at DESC', [stageIds], (err, files) => {
-            if (err) return callback(err, null);
-            
+            if (err) {
+                if (err.code === 'ER_NO_SUCH_TABLE') {
+                    const stagesWithFiles = stages.map(stage => ({
+                        ...stage,
+                        files: []
+                    }));
+                    return callback(null, stagesWithFiles);
+                }
+                return callback(err, null);
+            }
+
             // Attach files to their stages
             const stagesWithFiles = stages.map(stage => ({
                 ...stage,
                 files: files.filter(f => f.stage_id === stage.stage_id)
             }));
-            
+
             callback(null, stagesWithFiles);
         });
     });
