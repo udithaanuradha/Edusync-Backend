@@ -1,7 +1,26 @@
 const db = require('../config/db');
 
 const getStagesByLevel = (level, callback) => {
-    db.query('SELECT * FROM project_stages WHERE level = ? ORDER BY stage_id', [level], callback);
+    // First get all stages for this level
+    db.query('SELECT * FROM project_stages WHERE level = ? ORDER BY stage_id', [level], (err, stages) => {
+        if (err) return callback(err, null);
+        
+        // Then get all files for each stage
+        if (stages.length === 0) return callback(null, []);
+        
+        const stageIds = stages.map(s => s.stage_id);
+        db.query('SELECT * FROM files WHERE stage_id IN (?) ORDER BY uploaded_at DESC', [stageIds], (err, files) => {
+            if (err) return callback(err, null);
+            
+            // Attach files to their stages
+            const stagesWithFiles = stages.map(stage => ({
+                ...stage,
+                files: files.filter(f => f.stage_id === stage.stage_id)
+            }));
+            
+            callback(null, stagesWithFiles);
+        });
+    });
 };
 
 const getStageById = (id, callback) => {
@@ -31,4 +50,13 @@ const updateStage = (id, data, callback) => {
     );
 };
 
-module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage };
+const uploadStageFile = (data, callback) => {
+    const { stage_id, file_name, file_url, uploaded_by } = data;
+    db.query(
+        'INSERT INTO files (stage_id, file_name, file_url, uploaded_by) VALUES (?, ?, ?, ?)',
+        [stage_id, file_name, file_url, uploaded_by],
+        callback
+    );
+};
+
+module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage, uploadStageFile };
