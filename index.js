@@ -7,6 +7,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Import Cloudinary upload configuration
+const { upload } = require('./src/config/cloudinaryConfig');
+console.log('✅ Cloudinary configured for file uploads');
+
 // DB pool (reuse for auth routes inline)
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -60,11 +64,34 @@ app.post('/api/signup', (req, res) => {
   );
 });
 
+// ---- File Upload Handler (with Cloudinary) ----
+const { uploadStageFile } = require('./src/controllers/projectController');
+const Project = require('./src/models/projectModel');
+
+// Wrap upload middleware to catch errors
+app.post('/api/projects/upload-file', (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      console.error('❌ Upload Middleware Error:', err.message);
+      return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
+    }
+    next();
+  });
+}, uploadStageFile);
+
+console.log('📤 File upload route configured');
+
 // ---- Project stages routes ----
 const projectRoutes = require('./src/routes/projectRoutes');
-app.use('/api/projects', projectRoutes);  // <-- THIS WAS MISSING
+app.use('/api/projects', projectRoutes);
 
 app.get('/', (req, res) => res.send('Edusync Backend is running!'));
+
+// Global error handler (must be last!)
+app.use((err, req, res, next) => {
+  console.error('❌ Global Error Handler:', err);
+  res.status(500).json({ success: false, error: err.message || 'Internal server error' });
+});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

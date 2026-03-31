@@ -50,16 +50,54 @@ const updateStage = (req, res) => {
 };
 
 const uploadStageFile = (req, res) => {
-    const { stage_id, file_name, file_url, uploaded_by } = req.body;
-    if (!stage_id || !file_name || !file_url || !uploaded_by) {
-        return res.status(400).json({
-            success: false,
-            message: 'stage_id, file_name, file_url, and uploaded_by are required'
-        });
+    console.log('\n📤 Upload request received');
+    console.log(`   req.file: ${req.file ? '✅ Present' : '❌ Missing'}`);
+    console.log(`   req.body:`, req.body);
+    
+    // req.file is created by the upload.single('file') middleware (Cloudinary storage)
+    if (!req.file) {
+        console.error('❌ No file in request!');
+        return res.status(400).json({ success: false, error: 'No file provided' });
     }
-    Project.uploadStageFile({ stage_id, file_name, file_url, uploaded_by }, (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.status(201).json({ success: true, message: 'File uploaded!', file_id: result.insertId });
+
+    const { stage_id, uploaded_by } = req.body;
+    
+    if (!stage_id) {
+        console.error('❌ No stage_id provided!');
+        return res.status(400).json({ success: false, error: 'stage_id is required' });
+    }
+
+    // File info from Cloudinary
+    const fileName = req.file.originalname;
+    const fileUrl = req.file.path; // Cloudinary URL (e.g., https://res.cloudinary.com/...)
+    const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
+
+    console.log(`✅ File received: ${fileName}`);
+    console.log(`📍 File details:`, {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        path: req.file.path,
+        filename: req.file.filename
+    });
+    console.log(`🔗 Cloudinary URL: ${fileUrl}`);
+
+    Project.uploadStageFile({ 
+        stage_id, 
+        file_name: fileName, 
+        file_url: fileUrl, 
+        uploaded_by: uploaderId 
+    }, (err, result) => {
+        if (err) {
+            console.error('❌ Database Error:', err.message);
+            return res.status(500).json({ success: false, error: err.message });
+        }
+        console.log(`✅ File metadata saved to DB! File ID: ${result.insertId}`);
+        res.status(201).json({ 
+            success: true, 
+            message: 'File uploaded to Cloudinary successfully!', 
+            file_url: fileUrl, 
+            file_id: result.insertId 
+        });
     });
 };
 
