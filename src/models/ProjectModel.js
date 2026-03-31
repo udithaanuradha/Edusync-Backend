@@ -9,7 +9,7 @@ const getStagesByLevel = (level, callback) => {
         if (stages.length === 0) return callback(null, []);
         
         const stageIds = stages.map(s => s.stage_id);
-        db.query('SELECT * FROM files WHERE stage_id IN (?) ORDER BY uploaded_at DESC', [stageIds], (err, files) => {
+        db.query('SELECT * FROM stage_files WHERE stage_id IN (?) ORDER BY uploaded_at DESC', [stageIds], (err, files) => {
             if (err) {
                 if (err.code === 'ER_NO_SUCH_TABLE') {
                     const stagesWithFiles = stages.map(stage => ({
@@ -47,7 +47,30 @@ const createStage = (data, callback) => {
 };
 
 const deleteStage = (id, callback) => {
-    db.query('DELETE FROM project_stages WHERE stage_id = ?', [id], callback);
+    console.log("=== 1. Starting delete process for Stage ID:", id, "===");
+
+    // First, try to delete the files
+    db.query('DELETE FROM stage_files WHERE stage_id = ?', [id], (err, results) => {
+        if (err) {
+            console.log("❌ DB ERROR CAUGHT IN STAGE_FILES TABLE:");
+            console.error(err); // <-- This will print the exact SQL error!
+            return callback(err);
+        }
+
+        console.log("=== 2. Files deleted (or none existed). Now deleting the stage... ===");
+        
+        // Then, try to delete the stage itself
+        db.query('DELETE FROM project_stages WHERE stage_id = ?', [id], (err2, results2) => {
+            if (err2) {
+                console.log("❌ DB ERROR CAUGHT IN PROJECT_STAGES TABLE:");
+                console.error(err2); // <-- This will print the exact SQL error!
+                return callback(err2);
+            }
+            
+            console.log("✅ Stage successfully deleted from both tables!");
+            callback(null, results2);
+        });
+    });
 };
 
 const updateStage = (id, data, callback) => {
@@ -62,7 +85,7 @@ const updateStage = (id, data, callback) => {
 const uploadStageFile = (data, callback) => {
     const { stage_id, file_name, file_url, uploaded_by } = data;
     db.query(
-        'INSERT INTO files (stage_id, file_name, file_url, uploaded_by) VALUES (?, ?, ?, ?)',
+        'INSERT INTO stage_files (stage_id, file_name, file_url, uploaded_by) VALUES (?, ?, ?, ?)',
         [stage_id, file_name, file_url, uploaded_by],
         callback
     );
