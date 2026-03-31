@@ -17,21 +17,29 @@ console.log(`   API Secret: ${process.env.CLOUDINARY_API_SECRET ? 'âœ… Set' : 'â
 // 2. Setup the storage engine
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: (req, file) => {
+  params: async (req, file) => {
+    // Determine if the file is an image or a document based on its extension
+    const ext = file.originalname.split('.').pop().toLowerCase();
+    const isImage = ['jpg', 'jpeg', 'png'].includes(ext);
+
     return {
       folder: 'edusync_guidelines',
-      allowed_formats: ['jpg', 'png', 'pdf', 'docx', 'doc', 'xlsx', 'xls', 'txt', 'ppt', 'pptx'],
-      resource_type: 'auto'
+      // Images process as 'image', everything else (PDFs, DOCX, XLSX) processes as 'raw'
+      resource_type: isImage ? 'image' : 'raw', 
+      
+      // Note: We removed 'allowed_formats' from here because your 
+      // multer fileFilter (below) is already perfectly handling the security!
     };
   },
 });
 
 const upload = multer({ 
   storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit is generous and safe
   fileFilter: (req, file, cb) => {
     const allowedTypes = /pdf|jpeg|jpg|png|doc|docx|txt|xls|xlsx|ppt|pptx/;
     const extname = allowedTypes.test(file.originalname.split('.').pop().toLowerCase());
+    
     if (extname) {
       return cb(null, true);
     } else {
