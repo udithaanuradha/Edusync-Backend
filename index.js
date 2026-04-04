@@ -11,7 +11,7 @@ app.use(express.json());
 const { upload } = require('./src/config/cloudinaryConfig');
 console.log('✅ Cloudinary configured for file uploads');
 
-// DB pool (reuse for auth routes inline)
+// DB pool
 const db = mysql.createPool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT || 4000,
@@ -29,13 +29,13 @@ db.getConnection((err, connection) => {
   else { console.log('✅ Connected to TiDB Cloud!'); connection.release(); }
 });
 
-// ---- Auth routes (inline, as in develop branch) ----
+// ---- Auth routes ----
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
     return res.status(400).json({ error: 'Email and password required' });
   db.query(
-    'SELECT id, name, email, role FROM users WHERE email = ? AND password = ?',
+    'SELECT id, name, email, role, level FROM users WHERE email = ? AND password = ?',
     [email, password],
     (err, results) => {
       if (err) return res.status(500).json({ error: 'Internal server error' });
@@ -49,10 +49,13 @@ app.post('/api/signup', (req, res) => {
   const { firstName, lastName, email, password, role, universityId } = req.body;
   if (!firstName || !email || !password || !role)
     return res.status(400).json({ error: 'Missing required fields' });
+
   const finalUniId = role === 'student' ? universityId : null;
+  const startingLevel = role === 'student' ? 1 : null; // Auto Level 1 for students
+
   db.query(
-    'INSERT INTO users (name, email, password, role, university_id) VALUES (?, ?, ?, ?, ?)',
-    [`${firstName} ${lastName}`, email, password, role, finalUniId],
+    'INSERT INTO users (name, email, password, role, university_id, level) VALUES (?, ?, ?, ?, ?, ?)',
+    [`${firstName} ${lastName}`, email, password, role, finalUniId, startingLevel],
     (err) => {
       if (err) {
         if (err.code === 'ER_DUP_ENTRY')
@@ -68,7 +71,6 @@ app.post('/api/signup', (req, res) => {
 const { uploadStageFile } = require('./src/controllers/projectController');
 const Project = require('./src/models/projectModel');
 
-// Wrap upload middleware to catch errors
 app.post('/api/projects/upload-file', (req, res, next) => {
   upload.single('file')(req, res, (err) => {
     if (err) {
@@ -81,13 +83,61 @@ app.post('/api/projects/upload-file', (req, res, next) => {
 
 console.log('📤 File upload route configured');
 
+// ---- Get files for a stage ----
+app.get('/api/projects/files/:stage_id', (req, res) => {
+  db.query(
+    'SELECT * FROM stage_files WHERE stage_id = ? ORDER BY uploaded_at DESC',
+    [req.params.stage_id],
+    (err, results) => {
+      if (err) return res.status(500).json({ success: false, error: err.message });
+      res.json({ success: true, data: results });
+    }
+  );
+});
+
+// ---- Admin stats route ----
+app.get('/api/admin/stats', (req, res) => {
+  db.query(
+    `SELECT 
+      (SELECT COUNT(*) FROM users) as totalUsers,
+      (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
+      (SELECT COUNT(*) FROM users WHERE role = 'coordinator') as totalCoordinators,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor') as totalSupervisors
+    `,
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({
+        totalUsers: results[0].totalUsers,
+        totalStudents: results[0].totalStudents,
+        totalCoordinators: results[0].totalCoordinators,
+        totalSupervisors: results[0].totalSupervisors
+      });
+    }
+  );
+});
+
+// ---- Admin promote students route ----
+app.put('/api/admin/promote-students', (req, res) => {
+  db.query(
+    'UPDATE users SET level = level + 1 WHERE role = "student" AND level < 4',
+    (err, result) => {
+      if (err) return res.status(500).json({ error: 'Failed to promote students' });
+      res.status(200).json({
+        success: true,
+        message: 'Successfully promoted all eligible students!',
+        studentsUpdated: result.affectedRows
+      });
+    }
+  );
+});
+
 // ---- Project stages routes ----
 const projectRoutes = require('./src/routes/projectRoutes');
 app.use('/api/projects', projectRoutes);
 
 app.get('/', (req, res) => res.send('Edusync Backend is running!'));
 
-// Global error handler (must be last!)
+// Global error handler
 app.use((err, req, res, next) => {
   console.error('❌ Global Error Handler:', err);
   res.status(500).json({ success: false, error: err.message || 'Internal server error' });
