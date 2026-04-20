@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2');
 require('dotenv').config();
+// --- Newly Added Part ---
+const groupRoutes = require('./src/routes/groupRoutes');
 
 const app = express();
 app.use(cors());
@@ -82,6 +84,10 @@ app.post('/api/projects/upload-file', (req, res, next) => {
 }, uploadStageFile);
 
 console.log('📤 File upload route configured');
+
+// --- Newly Added Part ---
+// We pass 'db' into the function so the routes can use your connection pool
+app.use('/api/groups', groupRoutes(db));
 
 // ---- Get files for a stage ----
 app.get('/api/projects/files/:stage_id', (req, res) => {
