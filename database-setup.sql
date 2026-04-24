@@ -33,3 +33,21 @@ CREATE TABLE IF NOT EXISTS stage_files (
     CONSTRAINT fk_sf_stage    FOREIGN KEY (stage_id)    REFERENCES project_stages(stage_id) ON DELETE CASCADE,
     CONSTRAINT fk_sf_uploader FOREIGN KEY (uploaded_by) REFERENCES users(id)                ON DELETE RESTRICT
 );
+
+CREATE TABLE group_requests (
+    request_id INT AUTO_INCREMENT PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    members_list TEXT NOT NULL,
+    request_message TEXT,
+    student_id INT NOT NULL, 
+    supervisor_id INT NOT NULL,
+    status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+    rejection_reason TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_gr_student FOREIGN KEY (student_id) REFERENCES users(id),
+    CONSTRAINT fk_gr_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id)
+);
+ALTER TABLE group_requests 
+ADD COLUMN is_final_submitted BOOLEAN DEFAULT FALSE;
+ALTER TABLE group_requests 
+ADD COLUMN project_level INT NOT NULL;
