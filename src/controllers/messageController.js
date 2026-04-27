@@ -2,6 +2,7 @@ const {
   getConversation,
   sendMessage,
   markAsRead,
+  getGroupLeaders, // Imported here
 } = require("../models/MessageModel");
 
 // Get conversation history between two users
@@ -89,8 +90,19 @@ const readMessages = (req, res) => {
   });
 };
 
+// NEW: Controller to fetch group leaders
+const getLeaders = (req, res) => {
+  getGroupLeaders((err, leaders) => {
+    if (err) {
+      return res.status(500).json({ error: "Failed to fetch group leaders" });
+    }
+    res.status(200).json(leaders);
+  });
+};
+
 module.exports = {
   getMessages,
   postMessage,
   readMessages,
+  getLeaders, // Exported here
 };
