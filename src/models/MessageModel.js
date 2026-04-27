@@ -87,8 +87,27 @@ const markAsRead = (senderId, receiverId, callback) => {
   });
 };
 
+// NEW: Get group leaders based on your TiDB schema
+const getGroupLeaders = (callback) => {
+  const query = `
+    SELECT u.id, u.name, u.email, 'group_leader' as role 
+    FROM users u
+    JOIN project_group_members pgm ON u.id = pgm.student_id
+    WHERE pgm.is_leader = 1
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("Error fetching group leaders:", err);
+      return callback(err, null);
+    }
+    callback(null, results);
+  });
+};
+
 module.exports = {
   getConversation,
   sendMessage,
   markAsRead,
+  getGroupLeaders, // Exported here
 };
