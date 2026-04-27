@@ -142,10 +142,9 @@ app.use('/api/users', userRoutes);
 // ---- Group routes ----
 const groupRoutes = require('./src/routes/groupRoutes');
 app.use('/api/groups', groupRoutes);
-
-// ---- Announcement routes ----
-const announcementRoutes = require('./src/routes/announcementRoutes');
-app.use('/api/announcements', announcementRoutes);
+// ---- Calendar routes ----
+const calendarRoutes = require('./src/routes/calendarRoutes');
+app.use('/api/calendar', calendarRoutes);
 
 // ---- Base Route ----
 app.get('/', (req, res) => res.send('Edusync Backend is running!'));
