@@ -144,10 +144,13 @@ const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
 // --- GROUP MANAGEMENT & DISPLAY ---
-
 // This handles: http://localhost:5000/api/groups/display/:level
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
+
+// Calendar routes
+const calendarRoutes = require('./src/routes/calendarRoutes');
+app.use('/api/calendar', calendarRoutes);
 
 // Message routes
 const messageRoutes = require("./src/routes/messageRoutes");
