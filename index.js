@@ -135,13 +135,27 @@ app.put('/api/admin/promote-students', (req, res) => {
 const projectRoutes = require('./src/routes/projectRoutes');
 app.use('/api/projects', projectRoutes);
 
+// ---- User routes (Group Formation Search) ----
+const userRoutes = require('./src/routes/userRoutes');
+app.use('/api/users', userRoutes);
+
+// ---- Group routes ----
+const groupRoutes = require('./src/routes/groupRoutes');
+app.use('/api/groups', groupRoutes);
+
+// ---- Announcement routes ----
+const announcementRoutes = require('./src/routes/announcementRoutes');
+app.use('/api/announcements', announcementRoutes);
+
+// ---- Base Route ----
 app.get('/', (req, res) => res.send('Edusync Backend is running!'));
 
-// Global error handler
+// ---- Global error handler ----
 app.use((err, req, res, next) => {
   console.error('❌ Global Error Handler:', err);
   res.status(500).json({ success: false, error: err.message || 'Internal server error' });
 });
 
+// ---- Start Server ----
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
