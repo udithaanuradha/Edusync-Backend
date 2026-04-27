@@ -63,8 +63,19 @@ app.post("/api/signup", (req, res) => {
     ],
     (err) => {
       if (err) {
-        if (err.code === "ER_DUP_ENTRY")
-          return res.status(400).json({ error: "Email already exists" });
+        // Check if the database rejected it because of a duplicate
+        if (err.code === "ER_DUP_ENTRY") {
+          // Check if the duplicate was the email
+          if (err.sqlMessage.includes("email")) {
+            return res.status(400).json({ error: "This email is already registered." });
+          }
+          // Check if the duplicate was the Index Number
+          else if (err.sqlMessage.includes("university_id")) {
+            return res.status(400).json({ error: "This Index Number is already registered." });
+          }
+          // Fallback for any other duplicate
+          return res.status(400).json({ error: "Account already exists." });
+        }
         return res.status(500).json({ error: "Database error" });
       }
       res.status(201).json({ message: "User created successfully!" });
