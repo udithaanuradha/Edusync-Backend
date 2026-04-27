@@ -143,6 +143,10 @@ app.use('/api/users', userRoutes);
 const groupRoutes = require('./src/routes/groupRoutes');
 app.use('/api/groups', groupRoutes);
 
+// ---- Message routes ----
+const messageRoutes = require('./src/routes/messageRoutes');
+app.use('/api/messages', messageRoutes);
+
 // ---- Announcement routes ----
 const announcementRoutes = require('./src/routes/announcementRoutes');
 app.use('/api/announcements', announcementRoutes);
