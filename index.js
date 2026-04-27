@@ -1,152 +1,186 @@
-const express = require('express');
-const cors = require('cors');
-const mysql = require('mysql2');
-require('dotenv').config();
-// --- Newly Added Part ---
-const groupRoutes = require('./src/routes/groupRoutes');
+<<<<<<< HEAD
+const express = require("express");
+const cors = require("cors");
+const mysql = require("mysql2");
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Import Cloudinary upload configuration
-const { upload } = require('./src/config/cloudinaryConfig');
-console.log('✅ Cloudinary configured for file uploads');
+// --- 1. Cloudinary Configuration ---
+// Note: Ensure this file exports { upload }
+const { upload } = require("./src/config/cloudinaryConfig");
+console.log("✅ Cloudinary configured for file uploads");
 
-// DB pool
-const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT || 4000,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  ssl: { rejectUnauthorized: true }
-});
+// --- 2. Database Connection (TiDB Cloud / MySQL) ---
+const db = require("./src/config/db");
 
+// Check connection status in terminal
 db.getConnection((err, connection) => {
-  if (err) console.error('❌ DB connection failed:', err.message);
-  else { console.log('✅ Connected to TiDB Cloud!'); connection.release(); }
+  if (err) {
+    console.error("❌ Database connection failed:", err.message);
+  } else {
+    console.log("✅ Connected to TiDB Cloud / MySQL Database!");
+    connection.release();
+  }
 });
 
-// ---- Auth routes ----
-app.post('/api/login', (req, res) => {
+// --- 3. Authentication Routes ---
+app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
-    return res.status(400).json({ error: 'Email and password required' });
+    return res.status(400).json({ error: "Email and password required" });
+
   db.query(
-    'SELECT id, name, email, role, level FROM users WHERE email = ? AND password = ?',
+    "SELECT id, name, email, role, level FROM users WHERE email = ? AND password = ?",
     [email, password],
     (err, results) => {
-      if (err) return res.status(500).json({ error: 'Internal server error' });
-      if (!results.length) return res.status(401).json({ error: 'Invalid credentials' });
-      res.status(200).json({ message: 'Login successful', user: results[0] });
-    }
+      if (err) return res.status(500).json({ error: "Internal server error" });
+      if (!results.length)
+        return res.status(401).json({ error: "Invalid credentials" });
+      res.status(200).json({ message: "Login successful", user: results[0] });
+    },
   );
 });
 
-app.post('/api/signup', (req, res) => {
+app.post("/api/signup", (req, res) => {
   const { firstName, lastName, email, password, role, universityId } = req.body;
   if (!firstName || !email || !password || !role)
-    return res.status(400).json({ error: 'Missing required fields' });
+    return res.status(400).json({ error: "Missing required fields" });
 
-  const finalUniId = role === 'student' ? universityId : null;
-  const startingLevel = role === 'student' ? 1 : null; // Auto Level 1 for students
+  const finalUniId = role === "student" ? universityId : null;
+  const startingLevel = role === "student" ? 1 : null;
 
   db.query(
-    'INSERT INTO users (name, email, password, role, university_id, level) VALUES (?, ?, ?, ?, ?, ?)',
-    [`${firstName} ${lastName}`, email, password, role, finalUniId, startingLevel],
+    "INSERT INTO users (name, email, password, role, university_id, level) VALUES (?, ?, ?, ?, ?, ?)",
+    [
+      `${firstName} ${lastName}`,
+      email,
+      password,
+      role,
+      finalUniId,
+      startingLevel,
+    ],
     (err) => {
       if (err) {
-        if (err.code === 'ER_DUP_ENTRY')
-          return res.status(400).json({ error: 'Email already exists' });
-        return res.status(500).json({ error: 'Database error' });
+        // Check if the database rejected it because of a duplicate
+        if (err.code === "ER_DUP_ENTRY") {
+          // Check if the duplicate was the email
+          if (err.sqlMessage.includes("email")) {
+            return res.status(400).json({ error: "This email is already registered." });
+          }
+          // Check if the duplicate was the Index Number
+          else if (err.sqlMessage.includes("university_id")) {
+            return res.status(400).json({ error: "This Index Number is already registered." });
+          }
+          // Fallback for any other duplicate
+          return res.status(400).json({ error: "Account already exists." });
+        }
+        return res.status(500).json({ error: "Database error" });
       }
-      res.status(201).json({ message: 'User created successfully!' });
-    }
+      res.status(201).json({ message: "User created successfully!" });
+    },
   );
 });
 
-// ---- File Upload Handler (with Cloudinary) ----
-const { uploadStageFile } = require('./src/controllers/projectController');
-const Project = require('./src/models/projectModel');
+// --- 4. Project & File Management ---
+const { uploadStageFile } = require("./src/controllers/projectController");
 
-app.post('/api/projects/upload-file', (req, res, next) => {
-  upload.single('file')(req, res, (err) => {
-    if (err) {
-      console.error('❌ Upload Middleware Error:', err.message);
-      return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
-    }
-    next();
-  });
-}, uploadStageFile);
+app.post(
+  "/api/projects/upload-file",
+  (req, res, next) => {
+    upload.single("file")(req, res, (err) => {
+      if (err) {
+        console.error("❌ Upload Middleware Error:", err.message);
+        return res
+          .status(400)
+          .json({ success: false, error: `Upload error: ${err.message}` });
+      }
+      next();
+    });
+  },
+  uploadStageFile,
+);
 
-console.log('📤 File upload route configured');
-
-// --- Newly Added Part ---
-// We pass 'db' into the function so the routes can use your connection pool
-app.use('/api/groups', groupRoutes(db));
-
-// ---- Get files for a stage ----
-app.get('/api/projects/files/:stage_id', (req, res) => {
+app.get("/api/projects/files/:stage_id", (req, res) => {
   db.query(
-    'SELECT * FROM stage_files WHERE stage_id = ? ORDER BY uploaded_at DESC',
+    "SELECT * FROM stage_files WHERE stage_id = ? ORDER BY uploaded_at DESC",
     [req.params.stage_id],
     (err, results) => {
-      if (err) return res.status(500).json({ success: false, error: err.message });
+      if (err)
+        return res.status(500).json({ success: false, error: err.message });
       res.json({ success: true, data: results });
-    }
+    },
   );
 });
 
-// ---- Admin stats route ----
-app.get('/api/admin/stats', (req, res) => {
+// --- 5. Admin Routes ---
+app.get("/api/admin/stats", (req, res) => {
   db.query(
     `SELECT 
       (SELECT COUNT(*) FROM users) as totalUsers,
       (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
       (SELECT COUNT(*) FROM users WHERE role = 'coordinator') as totalCoordinators,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor') as totalSupervisors
-    `,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor') as totalSupervisors`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({
-        totalUsers: results[0].totalUsers,
-        totalStudents: results[0].totalStudents,
-        totalCoordinators: results[0].totalCoordinators,
-        totalSupervisors: results[0].totalSupervisors
-      });
-    }
+      res.json(results[0]);
+    },
   );
 });
 
-// ---- Admin promote students route ----
-app.put('/api/admin/promote-students', (req, res) => {
+app.put("/api/admin/promote-students", (req, res) => {
   db.query(
     'UPDATE users SET level = level + 1 WHERE role = "student" AND level < 4',
     (err, result) => {
-      if (err) return res.status(500).json({ error: 'Failed to promote students' });
+      if (err)
+        return res.status(500).json({ error: "Failed to promote students" });
       res.status(200).json({
         success: true,
-        message: 'Successfully promoted all eligible students!',
-        studentsUpdated: result.affectedRows
+        message: "Successfully promoted students!",
+        studentsUpdated: result.affectedRows,
       });
-    }
+    },
   );
 });
 
-// ---- Project stages routes ----
-const projectRoutes = require('./src/routes/projectRoutes');
-app.use('/api/projects', projectRoutes);
+// --- 6. Feature Routes ---
 
-app.get('/', (req, res) => res.send('Edusync Backend is running!'));
+// Project stages
+const projectRoutes = require("./src/routes/projectRoutes");
+app.use("/api/projects", projectRoutes);
 
-// Global error handler
+// User/Search routes
+const userRoutes = require("./src/routes/userRoutes");
+app.use("/api/users", userRoutes);
+
+// --- GROUP MANAGEMENT & DISPLAY ---
+// This handles: http://localhost:5000/api/groups/display/:level
+const groupRoutes = require("./src/routes/groupRoutes");
+app.use("/api/groups", groupRoutes);
+
+// Calendar routes
+const calendarRoutes = require('./src/routes/calendarRoutes');
+app.use('/api/calendar', calendarRoutes);
+
+// Message routes
+const messageRoutes = require("./src/routes/messageRoutes");
+app.use("/api/messages", messageRoutes);
+
+// Announcements
+const announcementRoutes = require("./src/routes/announcementRoutes");
+app.use("/api/announcements", announcementRoutes);
+
+// --- 7. Server Initialization ---
+app.get("/", (req, res) => res.send("Edusync Backend is running!"));
+
+// Global Error Handler
 app.use((err, req, res, next) => {
-  console.error('❌ Global Error Handler:', err);
-  res.status(500).json({ success: false, error: err.message || 'Internal server error' });
+  console.error("❌ Global Error Handler:", err);
+  res
+    .status(500)
+    .json({ success: false, error: err.message || "Internal server error" });
 });
 
 const PORT = process.env.PORT || 5000;
