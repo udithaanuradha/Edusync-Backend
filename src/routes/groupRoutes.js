@@ -1,44 +1,57 @@
- const express = require('express');
-// DELETE: any old lines here
-// ADD: The line below is what was missing!
-const router = express.Router(); 
+<<<<<<< HEAD
+const express = require('express');
+const router = express.Router();
+ 
+ const {
+  getGroupsByLevel,
+  getStudentGroup,
+  createGroup,
+  getCoordinatorApprovedRequests,
+  updateGroup,
+  deleteGroup,
+} = require('../controllers/groupController');
 
-module.exports = (db) => {
+// If you have authentication middleware, it is highly recommended to include it here
+// const authMiddleware = require('../middleware/authMiddleware');
 
-    // 1. Get Supervisors
-    router.get('/supervisors', (req, res) => {
-        db.query("SELECT id, name FROM users WHERE role = 'supervisor'", (err, results) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json(results);
-        });
-    });
+router.get('/display/:level', getGroupsByLevel);
 
-    // 2. Create Request
-    router.post('/request', (req, res) => {
-        const { group_name, members_list, request_message, student_id, supervisor_id, project_level } = req.body;
-        const sql = `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level) 
-                     VALUES (?, ?, ?, ?, ?, ?)`;
-        
-        db.query(sql, [group_name, members_list, request_message, student_id, supervisor_id, project_level], (err, result) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.status(201).json({ message: "Request Sent", groupId: result.insertId });
-        });
-    });
+/**
+ * @route   GET /api/groups/student-group/:studentId/:level
+ * @desc    Get group details for a specific student at a specific level
+ */
+router.get('/student-group/:studentId/:level', getStudentGroup);
 
-    // 3. Final Submit
-    router.put('/final-submit', (req, res) => {
-        const { request_id } = req.body;
-        const sql = `UPDATE group_requests SET is_final_submitted = TRUE WHERE request_id = ? AND status = 'approved'`;
-        
-        db.query(sql, [request_id], (err, result) => {
-            if (err) return res.status(500).json({ error: err.message });
-            if (result.affectedRows === 0) {
-                return res.status(400).json({ error: "Cannot finalize. Ensure supervisor has approved the request." });
-            }
-            res.json({ success: true, message: "Submitted to Coordinator" });
-        });
-    });
+/**
+ * @route   GET /api/groups/level/:level
+ * @desc    Get groups by level (General Management)
+ */
+router.get('/level/:level', getGroupsByLevel);
 
-    // This must be at the very bottom
-    return router; 
-};
+/**
+ * @route   GET /api/groups/coordinator/approved
+ * @desc    Get all requests approved by the coordinator
+ */
+router.get('/coordinator/approved', getCoordinatorApprovedRequests);
+
+/**
+ * @route   POST /api/groups/create
+ * @desc    Create a new project group
+ */
+router.post('/create', createGroup);
+
+/**
+ * @route   PUT /api/groups/:id OR /api/groups/update/:id
+ * @desc    Update group details
+ */
+router.put('/:id', updateGroup);
+router.put('/update/:id', updateGroup);
+
+/**
+ * @route   DELETE /api/groups/:id OR /api/groups/delete/:id
+ * @desc    Remove a group and its members
+ */
+router.delete('/:id', deleteGroup);
+router.delete('/delete/:id', deleteGroup);
+
+module.exports = router;
