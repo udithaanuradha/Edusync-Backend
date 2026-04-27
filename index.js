@@ -131,7 +131,11 @@ app.use('/api/users', userRoutes);
  
 // This handles: http://localhost:5000/api/groups/display/:level
 const groupRoutes = require('./src/routes/groupRoutes');
-app.use('/api/groups', groupRoutes); 
+app.use('/api/groups', groupRoutes);
+
+// Message routes
+const messageRoutes = require('./src/routes/messageRoutes');
+app.use('/api/messages', messageRoutes);
 
 // Announcements
 const announcementRoutes = require('./src/routes/announcementRoutes');
