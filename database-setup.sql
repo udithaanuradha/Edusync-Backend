@@ -40,7 +40,20 @@ ALTER TABLE group_requests
 ADD COLUMN is_final_submitted BOOLEAN DEFAULT FALSE;
 ALTER TABLE group_requests 
 ADD COLUMN project_level INT NOT NULL;
--- 4. Create the Messages Table (For Communication Feature)
+
+-- 4. Create the Project Groups Table
+CREATE TABLE project_groups (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    level INT NOT NULL,
+    supervisor_id INT,
+    created_by INT NOT NULL,  -- the coordinator who created the group
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_pg_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id),
+    CONSTRAINT fk_pg_created_by FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+-- 5. Create the Messages Table (For Communication Feature)
 CREATE TABLE IF NOT EXISTS messages (
     id INT AUTO_INCREMENT PRIMARY KEY,
     sender_id INT NOT NULL,
