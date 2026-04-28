@@ -203,6 +203,10 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+// Milestones & Tasks
+const milestoneRoutes = require("./src/routes/milestoneRoutes");
+app.use("/api/milestones", milestoneRoutes);
+
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 
