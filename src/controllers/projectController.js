@@ -67,6 +67,25 @@ const uploadStageFile = (req, res) => {
         return res.status(400).json({ success: false, error: 'stage_id is required' });
     }
 
+    // Fetches project stages by level while restricting industry mentors from accessing Level 1 content.
+    const getStagesByLevel = (req, res) => {
+    const { level } = req.params;
+    const { user_role } = req.body; // Or get this from your auth token/middleware
+
+    // Specifically block Mentors from Level 1, but allow 2, 3, and 4
+    if (level == 1 && user_role === 'mentor') {
+        return res.status(403).json({ 
+            success: false, 
+            message: "Industry mentors are not assigned to Level 1 stages." 
+        });
+    }
+
+    Project.getStagesByLevel(level, (err, results) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        res.json({ success: true, data: results });
+    });
+};
+
     // File info from Cloudinary
     const fileName = req.file.originalname;
     const fileUrl = req.file.path; // Cloudinary URL (e.g., https://res.cloudinary.com/...)
