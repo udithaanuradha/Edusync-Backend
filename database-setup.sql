@@ -27,17 +27,37 @@ CREATE TABLE project_stages (
 );
 
 -- 3. Create the Stage Files Table (For Guideline Documents)
-CREATE TABLE IF NOT EXISTS stage_files (
-    file_id         INT AUTO_INCREMENT PRIMARY KEY,
-    stage_id        INT          NOT NULL,
-    file_name       VARCHAR(255) NOT NULL,
-    file_url        VARCHAR(500) NOT NULL COMMENT 'path or cloud storage URL',
-    uploaded_by     INT          NOT NULL COMMENT 'FK → users.id',
-    uploaded_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_sf_stage    FOREIGN KEY (stage_id)    REFERENCES project_stages(stage_id) ON DELETE CASCADE,
-    CONSTRAINT fk_sf_uploader FOREIGN KEY (uploaded_by) REFERENCES users(id)                ON DELETE RESTRICT
+CREATE TABLE group_requests (
+    request_id INT AUTO_INCREMENT PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    members_list TEXT NOT NULL,
+    request_message TEXT,
+    student_id INT NOT NULL, 
+    supervisor_id INT NOT NULL,
+    status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+    rejection_reason TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_gr_student FOREIGN KEY (student_id) REFERENCES users(id),
+    CONSTRAINT fk_gr_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id)
 );
--- 4. Create the Messages Table (For Communication Feature)
+ALTER TABLE group_requests 
+ADD COLUMN is_final_submitted BOOLEAN DEFAULT FALSE;
+ALTER TABLE group_requests 
+ADD COLUMN project_level INT NOT NULL;
+
+-- 4. Create the Project Groups Table
+CREATE TABLE project_groups (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    group_name VARCHAR(255) NOT NULL,
+    level INT NOT NULL,
+    supervisor_id INT,
+    created_by INT NOT NULL,  -- the coordinator who created the group
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_pg_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id),
+    CONSTRAINT fk_pg_created_by FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+-- 5. Create the Messages Table (For Communication Feature)
 CREATE TABLE IF NOT EXISTS messages (
     id INT AUTO_INCREMENT PRIMARY KEY,
     sender_id INT NOT NULL,
