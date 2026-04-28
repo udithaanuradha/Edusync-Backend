@@ -15,6 +15,10 @@ console.log("✅ Cloudinary configured for file uploads");
 // --- 2. Database Connection (TiDB Cloud / MySQL) ---
 const db = require("./src/config/db");
 
+// --- 3. Validation Utilities ---
+const { validateUserCreation, VALID_ROLES } = require("./src/utils/validators");
+console.log("✅ Validation utilities loaded");
+
 // Check connection status in terminal
 db.getConnection((err, connection) => {
   if (err) {
@@ -45,8 +49,24 @@ app.post("/api/login", (req, res) => {
 
 app.post("/api/signup", (req, res) => {
   const { firstName, lastName, email, password, role, universityId } = req.body;
-  if (!firstName || !email || !password || !role)
-    return res.status(400).json({ error: "Missing required fields" });
+
+  // Validate user input using comprehensive validator
+  const validation = validateUserCreation({
+    firstName,
+    lastName,
+    email,
+    password,
+    role,
+    universityId
+  });
+
+  // Return validation errors if any exist
+  if (!validation.valid) {
+    return res.status(400).json({
+      error: "Validation failed",
+      details: validation.errors
+    });
+  }
 
   const finalUniId = role === "student" ? universityId : null;
   const startingLevel = role === "student" ? 1 : null;
