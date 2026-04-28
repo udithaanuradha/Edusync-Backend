@@ -74,3 +74,14 @@ CREATE TABLE IF NOT EXISTS messages (
     INDEX idx_conversation (sender_id, receiver_id),
     INDEX idx_created (created_at)
 );
+
+-- 6. Create the Supervisor Weekly Schedule Table
+CREATE TABLE IF NOT EXISTS supervisorpartincalender (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    supervisor_id INT NOT NULL UNIQUE,
+    weekly_schedule JSON NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_supervisorpartincalender_supervisor
+        FOREIGN KEY (supervisor_id) REFERENCES users(id) ON DELETE CASCADE
+);
