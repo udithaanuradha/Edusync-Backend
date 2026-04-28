@@ -85,3 +85,19 @@ CREATE TABLE IF NOT EXISTS supervisorpartincalender (
     CONSTRAINT fk_supervisorpartincalender_supervisor
         FOREIGN KEY (supervisor_id) REFERENCES users(id) ON DELETE CASCADE
 );
+-- 6. Create the marks Table 
+CREATE TABLE IF NOT EXISTS marks (
+  mark_id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  stage_id INT COMMENT 'NULL means overall grade',
+  marked_by INT NOT NULL COMMENT 'supervisor who gave the mark',
+  marks_obtained DECIMAL(5,2) NOT NULL,
+  total_marks DECIMAL(5,2) NOT NULL DEFAULT 100,
+  feedback TEXT,
+  mark_type ENUM('stage', 'overall') DEFAULT 'stage',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_mark_group FOREIGN KEY (group_id) REFERENCES project_groups(id),
+  CONSTRAINT fk_mark_stage FOREIGN KEY (stage_id) REFERENCES project_stages(stage_id),
+  CONSTRAINT fk_mark_supervisor FOREIGN KEY (marked_by) REFERENCES users(id)
+);
