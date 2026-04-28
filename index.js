@@ -67,11 +67,15 @@ app.post("/api/signup", (req, res) => {
         if (err.code === "ER_DUP_ENTRY") {
           // Check if the duplicate was the email
           if (err.sqlMessage.includes("email")) {
-            return res.status(400).json({ error: "This email is already registered." });
+            return res
+              .status(400)
+              .json({ error: "This email is already registered." });
           }
           // Check if the duplicate was the Index Number
           else if (err.sqlMessage.includes("university_id")) {
-            return res.status(400).json({ error: "This Index Number is already registered." });
+            return res
+              .status(400)
+              .json({ error: "This Index Number is already registered." });
           }
           // Fallback for any other duplicate
           return res.status(400).json({ error: "Account already exists." });
@@ -160,8 +164,12 @@ const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
 // Calendar routes
-const calendarRoutes = require('./src/routes/calendarRoutes');
-app.use('/api/calendar', calendarRoutes);
+const calendarRoutes = require("./src/routes/calendarRoutes");
+app.use("/api/calendar", calendarRoutes);
+
+// Supervisor recurring lecture schedule routes
+const supervisorpartincalenderRoutes = require("./src/routes/supervisorpartincalenderRoutes");
+app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 
 // Message routes
 const messageRoutes = require("./src/routes/messageRoutes");
