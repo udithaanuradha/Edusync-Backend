@@ -76,9 +76,9 @@ const getGroupsByLevel = async (req, res) => {
 
     const groupIds = groups.map((g) => g.groupId);
 
-    // 2. Get all members for these groups
+    // 2. Get all members for these groups with more details
     const [members] = await dbPromise.query(
-      `SELECT gm.group_id, u.name, gm.is_leader
+      `SELECT gm.group_id, u.id, u.name, u.university_id, gm.is_leader
        FROM project_group_members gm
        LEFT JOIN users u ON u.id = gm.student_id
        WHERE gm.group_id IN (?)
@@ -90,18 +90,24 @@ const getGroupsByLevel = async (req, res) => {
     const formattedData = groups.map((group) => {
       const groupMembers = members
         .filter((m) => m.group_id === group.groupId)
-        .map((m) => m.name || "Unknown Student");
+        .map((m) => ({
+          id: m.id,
+          name: m.name || "Unknown Student",
+          university_id: m.university_id,
+          is_leader: m.is_leader
+        }));
 
-      const leader = members.find(
-        (m) => m.group_id === group.groupId && Number(m.is_leader) === 1
+      const leader = groupMembers.find(
+        (m) => Number(m.is_leader) === 1
       );
 
       return {
         groupId: group.groupId,
         groupName: group.groupName,
         supervisor: group.supervisor || 'Not Assigned',
-        leader: leader ? leader.name : (groupMembers[0] || 'Not Assigned'),
-        members: groupMembers // This is the array for .join(', ')
+        leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
+        members: groupMembers,
+        status: 'Active'
       };
     });
 
@@ -151,9 +157,9 @@ const getStudentGroup = async (req, res) => {
 
     const groupIds = userGroups.map((g) => g.groupId);
 
-    // 2. Get all members for these groups
+    // 2. Get all members for these groups with more details
     const [members] = await dbPromise.query(
-      `SELECT gm.group_id, u.name, gm.is_leader
+      `SELECT gm.group_id, u.id, u.name, u.university_id, gm.is_leader
        FROM project_group_members gm
        LEFT JOIN users u ON u.id = gm.student_id
        WHERE gm.group_id IN (?)
@@ -165,10 +171,15 @@ const getStudentGroup = async (req, res) => {
     const formattedData = userGroups.map((group) => {
       const groupMembers = members
         .filter((m) => m.group_id === group.groupId)
-        .map((m) => m.name || "Unknown Student");
+        .map((m) => ({
+          id: m.id,
+          name: m.name || "Unknown Student",
+          university_id: m.university_id,
+          is_leader: m.is_leader
+        }));
 
-      const leader = members.find(
-        (m) => m.group_id === group.groupId && Number(m.is_leader) === 1
+      const leader = groupMembers.find(
+        (m) => Number(m.is_leader) === 1
       );
 
       return {
@@ -176,8 +187,9 @@ const getStudentGroup = async (req, res) => {
         groupName: group.groupName,
         level: group.level,
         supervisor: group.supervisor || 'Not Assigned',
-        leader: leader ? leader.name : (groupMembers[0] || 'Not Assigned'),
-        members: groupMembers 
+        leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
+        members: groupMembers,
+        status: 'Active'
       };
     });
 
@@ -240,7 +252,7 @@ const getCoordinatorApprovedRequests = async (req, res) => {
 };
 
 const createGroup = async (req, res) => {
-  const { groupName, level, supervisorId, leaderId, memberIds } = req.body;
+  const { groupName, level, supervisorId, leaderId, memberIds, createdBy } = req.body;
   let connection;
   try {
     await ensureGroupMembersTable();
@@ -248,8 +260,8 @@ const createGroup = async (req, res) => {
     await connection.beginTransaction();
 
     const [groupInsert] = await connection.query(
-      `INSERT INTO project_groups (group_name, level, supervisor_id) VALUES (?, ?, ?)`,
-      [groupName, level, supervisorId || null]
+      `INSERT INTO project_groups (group_name, level, supervisor_id, created_by) VALUES (?, ?, ?, ?)`,
+      [groupName, level, supervisorId || null, createdBy]
     );
 
     const groupId = groupInsert.insertId;
@@ -295,6 +307,70 @@ const deleteGroup = async (req, res) => {
   }
 };
 
+const getCoordinatorGroups = async (req, res) => {
+  const coordinatorId = req.params.coordinatorId;
+  const level = Number(req.params.level);
+  console.log(`🔍 Fetching groups created by Coordinator ${coordinatorId} for Level: ${level}`);
+  
+  try {
+    await ensureGroupMembersTable();
+
+    // 1. Get the Groups created by this coordinator at this level
+    const [groups] = await dbPromise.query(
+      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor
+       FROM project_groups pg
+       LEFT JOIN users u ON u.id = pg.supervisor_id
+       WHERE pg.created_by = ? AND pg.level = ?
+       ORDER BY pg.id DESC`,
+      [coordinatorId, level]
+    );
+
+    console.log(`📊 Found ${groups.length} groups created by coordinator ${coordinatorId} for Level ${level}.`);
+
+    if (!groups.length) {
+      return res.json([]); // Return empty array if no groups
+    }
+
+    const groupIds = groups.map((g) => g.groupId);
+
+    // 2. Get all members for these groups
+    const [members] = await dbPromise.query(
+      `SELECT gm.group_id, u.name, gm.is_leader
+       FROM project_group_members gm
+       LEFT JOIN users u ON u.id = gm.student_id
+       WHERE gm.group_id IN (?)
+       ORDER BY gm.is_leader DESC, u.name ASC`,
+      [groupIds]
+    );
+
+    // 3. Format the data into an Array of objects
+    const formattedData = groups.map((group) => {
+      const groupMembers = members
+        .filter((m) => m.group_id === group.groupId)
+        .map((m) => m.name || "Unknown Student");
+
+      const leader = members.find(
+        (m) => m.group_id === group.groupId && Number(m.is_leader) === 1
+      );
+
+      return {
+        groupId: group.groupId,
+        groupName: group.groupName,
+        supervisor: group.supervisor || 'Not Assigned',
+        leader: leader ? leader.name : (groupMembers[0] || 'Not Assigned'),
+        members: groupMembers // This is the array for .join(', ')
+      };
+    });
+
+    // CRITICAL: Send only the array so frontend can use .map()
+    return res.json(formattedData);
+
+  } catch (error) {
+    console.error('❌ Get Coordinator Groups Backend Error:', error);
+    return res.status(500).json({ error: 'Failed to fetch coordinator groups' });
+  }
+};
+
 module.exports = {
   getGroupsByLevel,
   getStudentGroup,
@@ -302,4 +378,5 @@ module.exports = {
   getCoordinatorApprovedRequests,
   updateGroup,
   deleteGroup,
+  getCoordinatorGroups,
 };
