@@ -171,6 +171,10 @@ app.use("/api/calendar", calendarRoutes);
 const supervisorpartincalenderRoutes = require("./src/routes/supervisorpartincalenderRoutes");
 app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 
+// NEW: Supervisor specific timeline tasks (meetings, personal, etc.)
+const supervisorTaskRoutes = require("./src/routes/supervisorTaskRoutes");
+app.use("/api/supervisor-tasks", supervisorTaskRoutes);
+
 // Message routes
 const messageRoutes = require("./src/routes/messageRoutes");
 app.use("/api/messages", messageRoutes);
