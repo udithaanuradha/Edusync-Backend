@@ -8,14 +8,12 @@ app.use(cors());
 app.use(express.json());
 
 // --- 1. Cloudinary Configuration ---
-// Note: Ensure this file exports { upload }
 const { upload } = require("./src/config/cloudinaryConfig");
 console.log("✅ Cloudinary configured for file uploads");
 
 // --- 2. Database Connection (TiDB Cloud / MySQL) ---
 const db = require("./src/config/db");
 
-// Check connection status in terminal
 db.getConnection((err, connection) => {
   if (err) {
     console.error("❌ Database connection failed:", err.message);
@@ -63,21 +61,13 @@ app.post("/api/signup", (req, res) => {
     ],
     (err) => {
       if (err) {
-        // Check if the database rejected it because of a duplicate
         if (err.code === "ER_DUP_ENTRY") {
-          // Check if the duplicate was the email
           if (err.sqlMessage.includes("email")) {
-            return res
-              .status(400)
-              .json({ error: "This email is already registered." });
+            return res.status(400).json({ error: "This email is already registered." });
           }
-          // Check if the duplicate was the Index Number
           else if (err.sqlMessage.includes("university_id")) {
-            return res
-              .status(400)
-              .json({ error: "This Index Number is already registered." });
+            return res.status(400).json({ error: "This Index Number is already registered." });
           }
-          // Fallback for any other duplicate
           return res.status(400).json({ error: "Account already exists." });
         }
         return res.status(500).json({ error: "Database error" });
@@ -96,9 +86,7 @@ app.post(
     upload.single("file")(req, res, (err) => {
       if (err) {
         console.error("❌ Upload Middleware Error:", err.message);
-        return res
-          .status(400)
-          .json({ success: false, error: `Upload error: ${err.message}` });
+        return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
       }
       next();
     });
@@ -149,49 +137,40 @@ app.put("/api/admin/promote-students", (req, res) => {
 });
 
 // --- 6. Feature Routes ---
-
-// Project stages
 const projectRoutes = require("./src/routes/projectRoutes");
 app.use("/api/projects", projectRoutes);
 
-// User/Search routes
 const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
-// --- GROUP MANAGEMENT & DISPLAY ---
-// This handles: http://localhost:5000/api/groups/display/:level
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
-// Calendar routes
 const calendarRoutes = require("./src/routes/calendarRoutes");
 app.use("/api/calendar", calendarRoutes);
 
-// Supervisor recurring lecture schedule routes
 const supervisorpartincalenderRoutes = require("./src/routes/supervisorpartincalenderRoutes");
 app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 
-// NEW: Supervisor specific timeline tasks (meetings, personal, etc.)
 const supervisorTaskRoutes = require("./src/routes/supervisorTaskRoutes");
 app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 
-// Message routes
 const messageRoutes = require("./src/routes/messageRoutes");
 app.use("/api/messages", messageRoutes);
 
-// Announcements
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+// NEW: Marks Management Routes
+const marksRoutes = require("./src/routes/marksRoutes");
+app.use("/api/marks", marksRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 
-// Global Error Handler
 app.use((err, req, res, next) => {
   console.error("❌ Global Error Handler:", err);
-  res
-    .status(500)
-    .json({ success: false, error: err.message || "Internal server error" });
+  res.status(500).json({ success: false, error: err.message || "Internal server error" });
 });
 
 const PORT = process.env.PORT || 5000;
