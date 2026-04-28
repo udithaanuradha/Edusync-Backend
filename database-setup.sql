@@ -9,10 +9,14 @@ CREATE TABLE users (
     email VARCHAR(255) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
     role VARCHAR(50) NOT NULL,
-    university_id VARCHAR(50) DEFAULT NULL,
+    university_id VARCHAR(50) DEFAULT NULL UNIQUE,
     phone VARCHAR(20) DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- For existing databases, run these once if constraints are missing:
+-- ALTER TABLE users ADD CONSTRAINT unique_email UNIQUE (email);
+-- ALTER TABLE users ADD CONSTRAINT unique_university_id UNIQUE (university_id);
 
 -- 2. Create the Project Stages Table
 CREATE TABLE project_stages (
