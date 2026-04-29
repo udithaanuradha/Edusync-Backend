@@ -438,10 +438,10 @@ const getStudentRequestStatus = async (req, res) => {
   const { studentId } = req.params;
   try {
     const [results] = await dbPromise.query(
-      `SELECT * FROM group_requests WHERE student_id = ? ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM group_requests WHERE student_id = ? ORDER BY created_at DESC`,
       [studentId]
     );
-    res.json(results[0] || null);
+    res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
