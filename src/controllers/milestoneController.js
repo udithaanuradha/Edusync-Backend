@@ -188,18 +188,61 @@ const getTasksByStudent = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { studentId } = req.params;
+    // Optional group_id query param — if provided, scope tasks to that group's project only
+    const groupId = req.query.groupId ? Number(req.query.groupId) : null;
 
-    const [tasks] = await dbPromise.query(
-      `SELECT t.*, m.title AS milestone_title 
-       FROM student_tasks t
-       JOIN milestones m ON t.milestone_id = m.id
-       WHERE t.assigned_to = ? ORDER BY t.due_date ASC`,
-      [studentId]
-    );
+    let query, params;
+    if (groupId) {
+      // Return only tasks that belong to milestones of this specific group
+      query = `SELECT t.*, m.title AS milestone_title, m.group_id AS group_id
+               FROM student_tasks t
+               JOIN milestones m ON t.milestone_id = m.id
+               WHERE t.assigned_to = ? AND m.group_id = ?
+               ORDER BY t.due_date ASC`;
+      params = [studentId, groupId];
+    } else {
+      // Fallback: return all tasks for the student (kept for backward compatibility)
+      query = `SELECT t.*, m.title AS milestone_title, m.group_id AS group_id
+               FROM student_tasks t
+               JOIN milestones m ON t.milestone_id = m.id
+               WHERE t.assigned_to = ?
+               ORDER BY t.due_date ASC`;
+      params = [studentId];
+    }
 
+    const [tasks] = await dbPromise.query(query, params);
     res.status(200).json({ success: true, data: tasks });
   } catch (error) {
     console.error('❌ Error fetching student tasks:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
+  }
+};
+
+// Strict group-scoped "My Tasks" — only tasks from the student's specific group project
+const getTasksByStudentAndGroup = async (req, res) => {
+  try {
+    await ensureMilestoneTables();
+    const { studentId, groupId } = req.params;
+
+    console.log(`📡 [Backend] Fetching tasks for Student: ${studentId}, Group: ${groupId}`);
+
+    const [tasks] = await dbPromise.query(
+      `SELECT t.id, t.milestone_id, t.assigned_to, t.task_name, t.description,
+              t.status, t.due_date, t.created_at,
+              m.title AS milestone_title, m.group_id AS group_id,
+              u.name AS assigned_to_name
+       FROM student_tasks t
+       JOIN milestones m ON t.milestone_id = m.id
+       LEFT JOIN users u ON u.id = t.assigned_to
+       WHERE t.assigned_to = ? AND m.group_id = ?
+       ORDER BY t.due_date ASC`,
+      [studentId, groupId]
+    );
+
+    console.log(`✅ [Backend] Found ${tasks.length} tasks for Student ${studentId} in Group ${groupId}`);
+    res.status(200).json({ success: true, data: tasks });
+  } catch (error) {
+    console.error('❌ Error fetching tasks by student and group:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
   }
 };
@@ -319,6 +362,7 @@ module.exports = {
   createStudentTask,
   getTasksByMilestone,
   getTasksByStudent,
+  getTasksByStudentAndGroup,
   getTasksByGroup,
   updateTaskStatus,
   deleteTask,
