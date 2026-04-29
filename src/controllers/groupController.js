@@ -364,10 +364,24 @@ const getCoordinatorGroups = async (req, res) => {
 
 const getGroupMembers = async (req, res) => {
   const groupId = req.params.groupId;
+  const userId = req.headers['x-user-id'];
+  const userRole = req.headers['x-user-role'];
+
   console.log(`🔍 Fetching members for Group ID: ${groupId}`);
   
   try {
     await ensureGroupMembersTable();
+
+    // Access Control
+    if (userId && userRole === 'student') {
+      const [membership] = await dbPromise.query(
+        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ?',
+        [userId, groupId]
+      );
+      if (membership.length === 0) {
+        return res.status(403).json({ success: false, error: 'Access denied. You are not a member of this group.' });
+      }
+    }
 
     const [members] = await dbPromise.query(
       `SELECT gm.group_id AS group_id, u.id AS id, u.name AS name, gm.is_leader AS is_leader
@@ -385,6 +399,54 @@ const getGroupMembers = async (req, res) => {
   }
 };
 
+const getSupervisors = async (req, res) => {
+  try {
+    const [results] = await dbPromise.query("SELECT id, name FROM users WHERE role = 'supervisor' ORDER BY name ASC");
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const createGroupRequest = async (req, res) => {
+  const { group_name, members_list, request_message, student_id, supervisor_id, project_level } = req.body;
+  try {
+    const sql = `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level) 
+                 VALUES (?, ?, ?, ?, ?, ?)`;
+    const [result] = await dbPromise.query(sql, [group_name, members_list, request_message, student_id, supervisor_id, project_level]);
+    res.status(201).json({ message: "Request Sent", groupId: result.insertId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const finalSubmitRequest = async (req, res) => {
+  const { request_id } = req.body;
+  try {
+    const sql = `UPDATE group_requests SET is_final_submitted = TRUE WHERE request_id = ? AND status = 'approved'`;
+    const [result] = await dbPromise.query(sql, [request_id]);
+    if (result.affectedRows === 0) {
+      return res.status(400).json({ error: "Cannot finalize. Ensure supervisor has approved the request." });
+    }
+    res.json({ success: true, message: "Submitted to Coordinator" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const getStudentRequestStatus = async (req, res) => {
+  const { studentId } = req.params;
+  try {
+    const [results] = await dbPromise.query(
+      `SELECT * FROM group_requests WHERE student_id = ? ORDER BY created_at DESC LIMIT 1`,
+      [studentId]
+    );
+    res.json(results[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getGroupsByLevel,
   getStudentGroup,
@@ -394,4 +456,8 @@ module.exports = {
   deleteGroup,
   getCoordinatorGroups,
   getGroupMembers,
-};
+  getSupervisors,
+  createGroupRequest,
+  finalSubmitRequest,
+  getStudentRequestStatus
+};

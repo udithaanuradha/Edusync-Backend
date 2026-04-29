@@ -10,10 +10,19 @@ const router = express.Router();
   deleteGroup,
   getCoordinatorGroups,
   getGroupMembers,
+  getSupervisors,
+  createGroupRequest,
+  finalSubmitRequest,
+  getStudentRequestStatus,
 } = require('../controllers/groupController');
 
 // If you have authentication middleware, it is highly recommended to include it here
 // const authMiddleware = require('../middleware/authMiddleware');
+
+router.get('/supervisors', getSupervisors);
+router.post('/request', createGroupRequest);
+router.put('/final-submit', finalSubmitRequest);
+router.get('/my-requests/:studentId', getStudentRequestStatus);
 
 router.get('/display/:level', getGroupsByLevel);
 router.get('/my-status/:studentId', getStudentGroup);

@@ -56,6 +56,18 @@ const ensureMilestoneTables = async () => {
   await ensureTablesPromise;
 };
 
+// --- ACCESS CONTROL HELPER ---
+const verifyMembership = async (userId, userRole, groupId) => {
+  // If not a student, we allow access for now (Coordinator, Supervisor, Admin)
+  if (userRole !== 'student') return true;
+  
+  const [rows] = await dbPromise.query(
+    'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ?',
+    [userId, groupId]
+  );
+  return rows.length > 0;
+};
+
 // ==========================================
 // MILESTONE CONTROLLERS
 // ==========================================
@@ -64,9 +76,19 @@ const createMilestone = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { group_id, title, description, start_date, due_date } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
 
     if (!group_id || !title) {
       return res.status(400).json({ success: false, error: 'group_id and title are required.' });
+    }
+
+    // Access Control
+    if (userId && userRole) {
+      const isMember = await verifyMembership(userId, userRole, group_id);
+      if (!isMember) {
+        return res.status(403).json({ success: false, error: 'Access denied. You are not a member of this group.' });
+      }
     }
 
     const [result] = await dbPromise.query(
@@ -85,6 +107,17 @@ const getMilestonesByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { groupId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    // Access Control
+    if (userId && userRole) {
+      const isMember = await verifyMembership(userId, userRole, groupId);
+      if (!isMember) {
+        return res.status(403).json({ success: false, error: 'Access denied. You are not a member of this group.' });
+      }
+    }
+
     console.log(`📡 [Backend] Fetching Milestones for Group ID: ${groupId}`);
 
     const [milestones] = await dbPromise.query(
@@ -108,9 +141,11 @@ const updateMilestoneStatus = async (req, res) => {
     await ensureMilestoneTables();
     const { id } = req.params;
     const { status, feedback_reason } = req.body;
+    const userRole = req.headers['x-user-role'];
 
-    if (!['PENDING', 'REJECTED', 'APPROVED'].includes(status)) {
-      return res.status(400).json({ success: false, error: 'Invalid status.' });
+    // Security: Only Supervisors, Coordinators, or Admins can update status
+    if (userRole === 'student') {
+      return res.status(403).json({ success: false, error: 'Access denied. Students cannot approve/reject milestones.' });
     }
 
     await dbPromise.query(
@@ -129,6 +164,15 @@ const deleteMilestone = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { id } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    // Access Control: Must belong to the group that owns the milestone
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [id]);
+    if (mRows.length > 0 && userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
 
     await dbPromise.query(`DELETE FROM milestones WHERE id = ?`, [id]);
     res.status(200).json({ success: true, message: 'Milestone deleted successfully' });
@@ -147,9 +191,18 @@ const createStudentTask = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { milestone_id, assigned_to, task_name, description, due_date } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
 
     if (!milestone_id || !assigned_to || !task_name) {
       return res.status(400).json({ success: false, error: 'milestone_id, assigned_to, and task_name are required.' });
+    }
+
+    // Access Control: Must belong to the group that owns the milestone
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [milestone_id]);
+    if (mRows.length > 0 && userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
 
     const [result] = await dbPromise.query(
@@ -168,14 +221,21 @@ const getTasksByMilestone = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { milestoneId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
 
-    const [tasks] = await dbPromise.query(
+    // Access Control
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [milestoneId]);
+    if (mRows.length > 0 && userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
       `SELECT t.*, u.name AS assigned_to_name 
        FROM student_tasks t
        LEFT JOIN users u ON t.assigned_to = u.id
        WHERE t.milestone_id = ? ORDER BY t.created_at ASC`,
       [milestoneId]
-    );
+    ;
 
     res.status(200).json({ success: true, data: tasks });
   } catch (error) {
@@ -188,6 +248,12 @@ const getTasksByStudent = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { studentId } = req.params;
+    const authUserId = req.headers['x-user-id'];
+
+    // Access Control: Student can only fetch their own tasks
+    if (authUserId && String(authUserId) !== String(studentId)) {
+      return res.status(403).json({ success: false, error: 'Access denied. You can only view your own tasks.' });
+    }
     // Optional group_id query param — if provided, scope tasks to that group's project only
     const groupId = req.query.groupId ? Number(req.query.groupId) : null;
 
@@ -251,6 +317,16 @@ const getTasksByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { groupId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    // Access Control
+    if (userId && userRole) {
+      const isMember = await verifyMembership(userId, userRole, groupId);
+      if (!isMember) {
+        return res.status(403).json({ success: false, error: 'Access denied. You are not a member of this group.' });
+      }
+    }
 
     const [tasks] = await dbPromise.query(
       `SELECT t.id AS id, t.milestone_id AS milestone_id, t.assigned_to AS assigned_to, 
@@ -276,9 +352,16 @@ const updateTaskStatus = async (req, res) => {
     await ensureMilestoneTables();
     const { id } = req.params;
     const { status } = req.body;
+    const userId = req.headers['x-user-id'];
 
     if (!['TODO', 'IN_PROGRESS', 'COMPLETED'].includes(status)) {
       return res.status(400).json({ success: false, error: 'Invalid status.' });
+    }
+
+    // Access Control: Student can only update status of tasks assigned to THEM
+    const [tRows] = await dbPromise.query('SELECT assigned_to FROM student_tasks WHERE id = ?', [id]);
+    if (tRows.length > 0 && userId && String(tRows[0].assigned_to) !== String(userId)) {
+      return res.status(403).json({ success: false, error: 'Access denied. You can only update your own tasks.' });
     }
 
     await dbPromise.query(
@@ -314,9 +397,17 @@ const upsertOverview = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { group_id, start_date, end_date, workflow_name } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
 
     if (!group_id) {
       return res.status(400).json({ success: false, error: 'group_id is required.' });
+    }
+
+    // Access Control
+    if (userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
 
     await dbPromise.query(
@@ -337,6 +428,14 @@ const getOverviewByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { groupId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    // Access Control
+    if (userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, groupId);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
 
     const [overviews] = await dbPromise.query(
       `SELECT * FROM project_overviews WHERE group_id = ?`,
