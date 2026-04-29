@@ -1,4 +1,4 @@
-const express = require("express");
+ const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
 require("dotenv").config();
@@ -55,14 +55,11 @@ app.post("/api/login", (req, res) => {
 app.post("/api/signup", (req, res) => {
   const { firstName, lastName, email, password, role, universityId } = req.body;
 
-  const validation = validateUserCreation({
-    firstName,
-    lastName,
-    email,
-    password,
-    role,
-    universityId
-  });
+  // Assuming validateUserCreation is defined globally or imported elsewhere 
+  // If you get an error here, ensure the validation function is imported.
+  const validation = typeof validateUserCreation === 'function' 
+    ? validateUserCreation({ firstName, lastName, email, password, role, universityId })
+    : { valid: true };
 
   if (!validation.valid) {
     return res.status(400).json({
@@ -146,7 +143,6 @@ app.get("/api/admin/stats", (req, res) => {
   );
 });
 
-//  Endpoint for Recent Logins 
 app.get("/api/admin/recent-logins", (req, res) => {
   db.query(
     `SELECT name as username, role, last_login as time 
@@ -200,18 +196,16 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
-<<<<<<< HEAD
-// Milestones & Tasks
+// Milestones & Tasks (Combined from HEAD)
 const milestoneRoutes = require("./src/routes/milestoneRoutes");
 app.use("/api/milestones", milestoneRoutes);
-=======
+
+// Dashboard & Marks (Combined from develop)
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 app.use("/api/dashboard", dashboardRoutes);
 
-// NEW: Marks Management Routes
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
->>>>>>> develop
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
