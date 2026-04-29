@@ -8,6 +8,7 @@ const {
   createStudentTask,
   getTasksByMilestone,
   getTasksByStudent,
+  getTasksByGroup,
   updateTaskStatus,
   deleteTask,
   upsertOverview,
@@ -48,6 +49,9 @@ router.get('/tasks/milestone/:milestoneId', getTasksByMilestone);
 
 // Get all tasks assigned to a specific student
 router.get('/tasks/student/:studentId', getTasksByStudent);
+
+// Get all tasks for a specific group
+router.get('/tasks/group/:groupId', getTasksByGroup);
 
 // Update task status (TODO, IN_PROGRESS, COMPLETED)
 router.put('/tasks/:id/status', updateTaskStatus);

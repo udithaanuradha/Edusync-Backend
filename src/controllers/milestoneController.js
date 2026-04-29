@@ -85,12 +85,17 @@ const getMilestonesByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { groupId } = req.params;
+    console.log(`📡 [Backend] Fetching Milestones for Group ID: ${groupId}`);
 
     const [milestones] = await dbPromise.query(
-      `SELECT * FROM milestones WHERE group_id = ? ORDER BY created_at ASC`,
+      `SELECT id AS id, group_id AS group_id, title AS title, description AS description, 
+              start_date AS start_date, due_date AS due_date, status AS status, 
+              feedback_reason AS feedback_reason, created_at AS created_at
+       FROM milestones WHERE group_id = ? ORDER BY created_at ASC`,
       [groupId]
     );
 
+    console.log(`✅ [Backend] Found ${milestones.length} milestones for Group ID: ${groupId}`);
     res.status(200).json({ success: true, data: milestones });
   } catch (error) {
     console.error('❌ Error fetching milestones:', error);
@@ -199,6 +204,30 @@ const getTasksByStudent = async (req, res) => {
   }
 };
 
+const getTasksByGroup = async (req, res) => {
+  try {
+    await ensureMilestoneTables();
+    const { groupId } = req.params;
+
+    const [tasks] = await dbPromise.query(
+      `SELECT t.id AS id, t.milestone_id AS milestone_id, t.assigned_to AS assigned_to, 
+              t.task_name AS task_name, t.description AS description, t.status AS status, 
+              t.due_date AS due_date, t.created_at AS created_at,
+              u.name AS assigned_to_name, m.title AS milestone_title 
+       FROM student_tasks t
+       JOIN milestones m ON t.milestone_id = m.id
+       LEFT JOIN users u ON u.id = t.assigned_to
+       WHERE m.group_id = ? ORDER BY t.created_at ASC`,
+      [groupId]
+    );
+
+    res.status(200).json({ success: true, data: tasks });
+  } catch (error) {
+    console.error('❌ Error fetching tasks by group:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
+  }
+};
+
 const updateTaskStatus = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -290,6 +319,7 @@ module.exports = {
   createStudentTask,
   getTasksByMilestone,
   getTasksByStudent,
+  getTasksByGroup,
   updateTaskStatus,
   deleteTask,
   upsertOverview,

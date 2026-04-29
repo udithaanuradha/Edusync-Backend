@@ -130,23 +130,14 @@ const getStudentGroup = async (req, res) => {
     await ensureGroupMembersTable();
 
     // 1. Find the group(s) this student belongs to at the specified level
-    let query = `
+    // We use a more flexible query to handle potential column casing (e.g. student_Id vs student_id)
+    const [userGroups] = await dbPromise.query(
+      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor, pg.level
        FROM project_groups pg
        JOIN project_group_members gm ON pg.id = gm.group_id
        LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE gm.student_id = ?`;
-    
-    const params = [studentId];
-    
-    if (level) {
-      query += ` AND pg.level = ?`;
-      params.push(level);
-    }
-
-    console.log(`📝 Executing query for student groups...`);
-    const [userGroups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor, pg.level` + query,
-      params
+       WHERE gm.student_id = ? ${level ? 'AND pg.level = ?' : ''}`,
+      level ? [studentId, level] : [studentId]
     );
 
     console.log(`📊 Found ${userGroups.length} groups for this student.`);
@@ -371,6 +362,29 @@ const getCoordinatorGroups = async (req, res) => {
   }
 };
 
+const getGroupMembers = async (req, res) => {
+  const groupId = req.params.groupId;
+  console.log(`🔍 Fetching members for Group ID: ${groupId}`);
+  
+  try {
+    await ensureGroupMembersTable();
+
+    const [members] = await dbPromise.query(
+      `SELECT gm.group_id AS group_id, u.id AS id, u.name AS name, gm.is_leader AS is_leader
+       FROM project_group_members gm
+       LEFT JOIN users u ON u.id = gm.student_id
+       WHERE gm.group_id = ?
+       ORDER BY gm.is_leader DESC, u.name ASC`,
+      [groupId]
+    );
+
+    res.status(200).json({ success: true, data: members });
+  } catch (error) {
+    console.error('❌ Error fetching group members:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch group members.' });
+  }
+};
+
 module.exports = {
   getGroupsByLevel,
   getStudentGroup,
@@ -379,4 +393,5 @@ module.exports = {
   updateGroup,
   deleteGroup,
   getCoordinatorGroups,
+  getGroupMembers,
 };

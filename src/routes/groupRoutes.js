@@ -9,6 +9,7 @@ const router = express.Router();
   updateGroup,
   deleteGroup,
   getCoordinatorGroups,
+  getGroupMembers,
 } = require('../controllers/groupController');
 
 // If you have authentication middleware, it is highly recommended to include it here
@@ -22,6 +23,12 @@ router.get('/my-status/:studentId', getStudentGroup);
  * @desc    Get group details for a specific student at a specific level
  */
 router.get('/student-group/:studentId/:level', getStudentGroup);
+
+/**
+ * @route   GET /api/groups/:groupId/members
+ * @desc    Get members of a group
+ */
+router.get('/:groupId/members', getGroupMembers);
 
 /**
  * @route   GET /api/groups/level/:level
