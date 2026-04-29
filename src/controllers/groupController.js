@@ -437,12 +437,31 @@ const finalSubmitRequest = async (req, res) => {
 const getStudentRequestStatus = async (req, res) => {
   const { studentId } = req.params;
   try {
-    const [results] = await dbPromise.query(
-      `SELECT * FROM group_requests WHERE student_id = ? ORDER BY created_at DESC`,
+    // 1. Get the student's university_id to check if they are a member (not just the leader)
+    const [userRows] = await dbPromise.query(
+      'SELECT university_id FROM users WHERE id = ?',
       [studentId]
     );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const universityId = userRows[0].university_id;
+
+    // 2. Fetch requests where user is the leader OR their university_id is in the members_list
+    // IMPORTANT: Only check members_list if universityId is valid to prevent LIKE '%%' matching everything
+    const [results] = await dbPromise.query(
+      `SELECT * FROM group_requests 
+       WHERE student_id = ? 
+          OR (? != '' AND ? IS NOT NULL AND members_list LIKE ?) 
+       ORDER BY created_at DESC`,
+      [studentId, universityId || '', universityId, `%${universityId}%`]
+    );
+
     res.json(results);
   } catch (err) {
+    console.error('❌ Error in getStudentRequestStatus:', err);
     res.status(500).json({ error: err.message });
   }
 };
