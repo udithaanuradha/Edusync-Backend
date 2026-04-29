@@ -39,7 +39,6 @@ app.post("/api/login", (req, res) => {
 
       const user = results[0];
 
-      // UPDATE: Track the login time in the database
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
         [user.id],
@@ -48,7 +47,7 @@ app.post("/api/login", (req, res) => {
           res.status(200).json({ message: "Login successful", user: user });
         }
       );
-    },
+    }
   );
 });
 
@@ -56,19 +55,11 @@ app.post("/api/signup", (req, res) => {
   const { firstName, lastName, email, password, role, universityId } = req.body;
 
   const validation = validateUserCreation({
-    firstName,
-    lastName,
-    email,
-    password,
-    role,
-    universityId
+    firstName, lastName, email, password, role, universityId
   });
 
   if (!validation.valid) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.errors
-    });
+    return res.status(400).json({ error: "Validation failed", details: validation.errors });
   }
 
   const finalUniId = role === "student" ? universityId : null;
@@ -76,29 +67,20 @@ app.post("/api/signup", (req, res) => {
 
   db.query(
     "INSERT INTO users (name, email, password, role, university_id, level) VALUES (?, ?, ?, ?, ?, ?)",
-    [
-      `${firstName} ${lastName}`,
-      email,
-      password,
-      role,
-      finalUniId,
-      startingLevel,
-    ],
+    [`${firstName} ${lastName}`, email, password, role, finalUniId, startingLevel],
     (err) => {
       if (err) {
         if (err.code === "ER_DUP_ENTRY") {
-          if (err.sqlMessage.includes("email")) {
+          if (err.sqlMessage.includes("email"))
             return res.status(400).json({ error: "This email is already registered." });
-          }
-          else if (err.sqlMessage.includes("university_id")) {
+          else if (err.sqlMessage.includes("university_id"))
             return res.status(400).json({ error: "This Index Number is already registered." });
-          }
           return res.status(400).json({ error: "Account already exists." });
         }
         return res.status(500).json({ error: "Database error" });
       }
       res.status(201).json({ message: "User created successfully!" });
-    },
+    }
   );
 });
 
@@ -116,7 +98,7 @@ app.post(
       next();
     });
   },
-  uploadStageFile,
+  uploadStageFile
 );
 
 app.get("/api/projects/files/:stage_id", (req, res) => {
@@ -126,7 +108,7 @@ app.get("/api/projects/files/:stage_id", (req, res) => {
     (err, results) => {
       if (err) return res.status(500).json({ success: false, error: err.message });
       res.json({ success: true, data: results });
-    },
+    }
   );
 });
 
@@ -142,23 +124,26 @@ app.get("/api/admin/stats", (req, res) => {
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(results[0]);
-    },
+    }
   );
 });
 
-//  Endpoint for Recent Logins 
+// Using DATE_FORMAT in your SQL query
 app.get("/api/admin/recent-logins", (req, res) => {
-  db.query(
-    `SELECT name as username, role, last_login as time 
-     FROM users 
-     WHERE last_login IS NOT NULL 
-     ORDER BY last_login DESC 
-     LIMIT 5`,
-    (err, results) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json(results);
-    }
-  );
+  const query = `
+    SELECT 
+      name as username, 
+      role, 
+      DATE_FORMAT(CONVERT_TZ(last_login, '+00:00', '+05:30'), '%b %d, %h:%i %p') as time 
+    FROM users 
+    WHERE last_login IS NOT NULL 
+    ORDER BY last_login DESC 
+    LIMIT 5`;
+
+  db.query(query, (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
 });
 
 app.put("/api/admin/promote-students", (req, res) => {
@@ -171,7 +156,7 @@ app.put("/api/admin/promote-students", (req, res) => {
         message: "Successfully promoted students!",
         studentsUpdated: result.affectedRows,
       });
-    },
+    }
   );
 });
 
@@ -203,9 +188,12 @@ app.use("/api/announcements", announcementRoutes);
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 app.use("/api/dashboard", dashboardRoutes);
 
-// NEW: Marks Management Routes
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
+
+// ✅ NEW: Backup Schedule Routes
+const backupRoutes = require("./src/routes/backupRoutes");
+app.use("/api/backups", backupRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));

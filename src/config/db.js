@@ -15,6 +15,7 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  timezone: '+05:30',
   // If you are working locally (XAMPP), you might need to comment out the SSL line
   ssl: { rejectUnauthorized: true } 
 });
