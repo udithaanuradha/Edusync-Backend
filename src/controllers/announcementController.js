@@ -18,16 +18,32 @@ let ensureAnnouncementsTablePromise = null;
 
 const ensureAnnouncementsTable = async () => {
   if (!ensureAnnouncementsTablePromise) {
-    ensureAnnouncementsTablePromise = dbPromise.query(`
-      CREATE TABLE IF NOT EXISTS announcements (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        message TEXT NOT NULL,
-        target_audience VARCHAR(64) NOT NULL DEFAULT 'All',
-        author_name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+    ensureAnnouncementsTablePromise = (async () => {
+      // Create table if it doesn't exist
+      await dbPromise.query(`
+        CREATE TABLE IF NOT EXISTS announcements (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          title VARCHAR(255) NOT NULL,
+          message TEXT NOT NULL,
+          target_audience VARCHAR(64) NOT NULL DEFAULT 'All',
+          author_name VARCHAR(255) NOT NULL,
+          author_id INT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      
+      // Add author_id column if it doesn't exist
+      try {
+        await dbPromise.query(`
+          ALTER TABLE announcements ADD COLUMN author_id INT AFTER author_name
+        `);
+      } catch (error) {
+        // Column might already exist, ignore error
+        if (error.code !== 'ER_DUP_FIELDNAME') {
+          console.error('Error adding author_id column:', error.message);
+        }
+      }
+    })();
   }
 
   await ensureAnnouncementsTablePromise;
@@ -49,6 +65,9 @@ const createAnnouncement = async (req, res) => {
     req.body.posted_by,
     req.body.postedBy
   ) || 'System';
+  
+  // Get author_id from request or token
+  const authorId = req.body.author_id || req.user?.id || null;
 
   if (!title || !message) {
     return res.status(400).json({
@@ -63,11 +82,11 @@ const createAnnouncement = async (req, res) => {
     const normalizedAuthor = String(authorName).trim();
 
     const query = `
-      INSERT INTO announcements (title, message, target_audience, author_name)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO announcements (title, message, target_audience, author_name, author_id)
+      VALUES (?, ?, ?, ?, ?)
     `;
 
-    const [result] = await dbPromise.query(query, [title, message, normalizedAudience, normalizedAuthor]);
+    const [result] = await dbPromise.query(query, [title, message, normalizedAudience, normalizedAuthor, authorId]);
 
     return res.status(201).json({
       success: true,
@@ -77,7 +96,8 @@ const createAnnouncement = async (req, res) => {
         title,
         message,
         target_audience: normalizedAudience,
-        author_name: normalizedAuthor
+        author_name: normalizedAuthor,
+        author_id: authorId
       }
     });
   } catch (error) {
@@ -92,6 +112,7 @@ const getAnnouncements = async (req, res) => {
   const userName = firstNonEmptyString(req.query.name, req.query.user_name, req.query.userName);
   const authorName = firstNonEmptyString(req.query.author, req.query.author_name, req.query.authorName);
   const allAudienceOnly = req.query.all_audience === 'true';
+  const currentUserId = req.query.exclude_author_id ? parseInt(req.query.exclude_author_id, 10) : null;
 
   try {
     await ensureAnnouncementsTable();
@@ -113,20 +134,25 @@ const getAnnouncements = async (req, res) => {
       query = `SELECT * FROM announcements ORDER BY created_at DESC`;
     }
     // 4. COORDINATOR: Uses "Rule of Relevance"
-    // Sees: Global posts + Coordinator-targeted posts + posts they authored
+    // Sees: Global posts + Coordinator-targeted posts (but NOT their own posts on dashboard)
     else if (userRole && userRole.toLowerCase() === 'coordinator') {
       query = `
         SELECT * FROM announcements 
-        WHERE LOWER(target_audience) IN ('all', 'all system users') 
-           OR LOWER(target_audience) LIKE ?
-           OR author_name = ?
-        ORDER BY created_at DESC
+        WHERE (LOWER(target_audience) IN ('all', 'all system users') 
+           OR LOWER(target_audience) LIKE ?)
       `;
       params.push('%coordinator%');
-      params.push(userName || '');
+      
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
+        params.push(currentUserId);
+      }
+      
+      query += ` ORDER BY created_at DESC`;
     }
     // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
-    // Sees: Global posts + posts targeted to their role/level
+    // Sees: Global posts + posts targeted to their role/level (but NOT their own posts on dashboard)
     else if (userRole) {
       const normalizedRole = normalizeAudience(userRole);
       const normalizedLevelAudience = userLevel ? normalizeAudience(`Level${userLevel}`) : '';
@@ -143,11 +169,25 @@ const getAnnouncements = async (req, res) => {
         params.push(`%${normalizedLevelAudience}%`);
       }
 
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
+        params.push(currentUserId);
+      }
+      
       query += ' ORDER BY created_at DESC';
     }
     // 6. Fallback: No valid parameters provided
     else {
-      query = `SELECT * FROM announcements WHERE LOWER(target_audience) IN ('all', 'all system users') ORDER BY created_at DESC`;
+      query = `SELECT * FROM announcements WHERE LOWER(target_audience) IN ('all', 'all system users')`;
+      
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
+        params.push(currentUserId);
+      }
+      
+      query += ` ORDER BY created_at DESC`;
     }
 
     const [results] = await dbPromise.query(query, params);

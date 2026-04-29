@@ -161,6 +161,9 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+const dashboardRoutes = require("./src/routes/dashboardRoutes");
+app.use("/api/dashboard", dashboardRoutes);
+
 // NEW: Marks Management Routes
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
