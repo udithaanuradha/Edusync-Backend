@@ -14,10 +14,6 @@ console.log("✅ Cloudinary configured for file uploads");
 // --- 2. Database Connection ---
 const db = require("./src/config/db");
 
-// --- 3. Validation Utilities ---
-const { validateUserCreation, VALID_ROLES } = require("./src/utils/validators");
-console.log("✅ Validation utilities loaded");
-
 db.getConnection((err, connection) => {
   if (err) {
     console.error("❌ Database connection failed:", err.message);
@@ -93,7 +89,8 @@ app.post("/api/signup", (req, res) => {
         if (err.code === "ER_DUP_ENTRY") {
           if (err.sqlMessage.includes("email")) {
             return res.status(400).json({ error: "This email is already registered." });
-          } else if (err.sqlMessage.includes("university_id")) {
+          }
+          else if (err.sqlMessage.includes("university_id")) {
             return res.status(400).json({ error: "This Index Number is already registered." });
           }
           return res.status(400).json({ error: "Account already exists." });
@@ -202,6 +199,13 @@ app.use("/api/messages", messageRoutes);
 
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+const dashboardRoutes = require("./src/routes/dashboardRoutes");
+app.use("/api/dashboard", dashboardRoutes);
+
+// NEW: Marks Management Routes
+const marksRoutes = require("./src/routes/marksRoutes");
+app.use("/api/marks", marksRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
