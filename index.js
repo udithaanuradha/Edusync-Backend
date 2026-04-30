@@ -3,6 +3,9 @@ const cors = require("cors");
 const mysql = require("mysql2");
 require("dotenv").config();
 
+// ✅ ADD THIS ONE LINE - imports the missing function
+const { validateUserCreation } = require('./src/utils/validators');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -128,7 +131,6 @@ app.get("/api/admin/stats", (req, res) => {
   );
 });
 
-// Using DATE_FORMAT in your SQL query
 app.get("/api/admin/recent-logins", (req, res) => {
   const query = `
     SELECT 
@@ -191,7 +193,7 @@ app.use("/api/dashboard", dashboardRoutes);
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
 
-// ✅ NEW: Backup Schedule Routes
+// ✅ Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
 
