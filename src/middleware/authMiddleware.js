@@ -6,7 +6,6 @@ const verifyToken = (req, res, next) => {
     }
 
     // Token validation logic (you can integrate JWT here)
-    // For now, we'll pass the token and validate role in the controller
     req.token = token;
     req.userId = req.body.created_by; // Get user ID from request
     next();

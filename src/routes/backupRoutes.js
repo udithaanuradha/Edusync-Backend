@@ -4,7 +4,7 @@ const backupController = require('../controllers/backupController');
 
 router.get('/', backupController.getAllBackups);
 router.post('/', backupController.createBackup);
-router.put('/:id', backupController.updateBackup);    // ✅ NEW
-router.delete('/:id', backupController.deleteBackup); // ✅ NEW
+router.put('/:id', backupController.updateBackup);    
+router.delete('/:id', backupController.deleteBackup); 
 
 module.exports = router;

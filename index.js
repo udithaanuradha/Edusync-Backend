@@ -3,7 +3,7 @@ const cors = require("cors");
 const mysql = require("mysql2");
 require("dotenv").config();
 
-// ✅ ADD THIS ONE LINE - imports the missing function
+
 const { validateUserCreation } = require('./src/utils/validators');
 
 const app = express();
@@ -193,7 +193,7 @@ app.use("/api/dashboard", dashboardRoutes);
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
 
-// ✅ Backup Schedule Routes
+// Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
 

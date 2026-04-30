@@ -114,7 +114,7 @@ const updateAnnouncement = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Update failed' }); }
 };
 
-// ✅ DELETE — only allow if author_id matches
+// DELETE — only allow if author_id matches
 const deleteAnnouncement = async (req, res) => {
   try {
     const { id } = req.params;

@@ -54,7 +54,7 @@ const uploadStageFile = (req, res) => {
     console.log(`   req.file: ${req.file ? '✅ Present' : '❌ Missing'}`);
     console.log(`   req.body:`, req.body);
     
-    // req.file is created by the upload.single('file') middleware (Cloudinary storage)
+    
     if (!req.file) {
         console.error('❌ No file in request!');
         return res.status(400).json({ success: false, error: 'No file provided' });
@@ -70,7 +70,7 @@ const uploadStageFile = (req, res) => {
     // Fetches project stages by level while restricting industry mentors from accessing Level 1 content.
     const getStagesByLevel = (req, res) => {
     const { level } = req.params;
-    const { user_role } = req.body; // Or get this from your auth token/middleware
+    const { user_role } = req.body; 
 
     // Specifically block Mentors from Level 1, but allow 2, 3, and 4
     if (level == 1 && user_role === 'mentor') {

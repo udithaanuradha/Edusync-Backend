@@ -27,7 +27,7 @@ exports.createBackup = (req, res) => {
     );
 };
 
-// ✅ PUT update a backup
+// PUT update a backup
 exports.updateBackup = (req, res) => {
     const { id } = req.params;
     const { type, date, time } = req.body;
@@ -45,7 +45,7 @@ exports.updateBackup = (req, res) => {
     );
 };
 
-// ✅ DELETE a backup
+// DELETE a backup
 exports.deleteBackup = (req, res) => {
     const { id } = req.params;
     db.query(
