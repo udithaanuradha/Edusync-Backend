@@ -1,16 +1,13 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
 
-// CRITICAL FIX: Declare this variable outside the function so it persists
 let ensureAnnouncementsTablePromise = null;
 
 const normalizeAudience = (value) => String(value || '').trim().toLowerCase();
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
+    if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return '';
 };
@@ -18,7 +15,6 @@ const firstNonEmptyString = (...values) => {
 const ensureAnnouncementsTable = async () => {
   if (!ensureAnnouncementsTablePromise) {
     ensureAnnouncementsTablePromise = (async () => {
-      // Create table
       await dbPromise.query(`
         CREATE TABLE IF NOT EXISTS announcements (
           id INT AUTO_INCREMENT PRIMARY KEY,
@@ -30,21 +26,15 @@ const ensureAnnouncementsTable = async () => {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
-      
-      // Attempt to add column if it was missing from an older version
       try {
         await dbPromise.query(`ALTER TABLE announcements ADD COLUMN author_id INT AFTER author_name`);
-      } catch (error) {
-        // Ignore if column already exists
-      }
+      } catch (error) { /* already exists */ }
     })();
   }
   return ensureAnnouncementsTablePromise;
 };
 
-/**
- * CREATE: Post a new announcement
- */
+// CREATE
 const createAnnouncement = async (req, res) => {
   const title = firstNonEmptyString(req.body.title, req.body.subject);
   const message = firstNonEmptyString(req.body.message, req.body.content);
@@ -58,8 +48,10 @@ const createAnnouncement = async (req, res) => {
 
   try {
     await ensureAnnouncementsTable();
-    const query = `INSERT INTO announcements (title, message, target_audience, author_name, author_id) VALUES (?, ?, ?, ?, ?)`;
-    const [result] = await dbPromise.query(query, [title, message, targetAudience, authorName, authorId]);
+    const [result] = await dbPromise.query(
+      `INSERT INTO announcements (title, message, target_audience, author_name, author_id) VALUES (?, ?, ?, ?, ?)`,
+      [title, message, targetAudience, authorName, authorId]
+    );
     res.status(201).json({ success: true, id: result.insertId });
   } catch (error) {
     console.error('Create Error:', error);
@@ -67,9 +59,7 @@ const createAnnouncement = async (req, res) => {
   }
 };
 
-/**
- * READ: Fetch with Role-Based Filtering
- */
+// READ
 const getAnnouncements = async (req, res) => {
   const userRole = firstNonEmptyString(req.query.role, req.query.userRole);
   const userLevel = firstNonEmptyString(req.query.level, req.query.userLevel);
@@ -78,14 +68,12 @@ const getAnnouncements = async (req, res) => {
 
   try {
     await ensureAnnouncementsTable();
-    
     let query = `SELECT * FROM announcements`;
     let params = [];
     let conditions = [];
 
-    // Filter Logic
     if (allAudienceOnly || (userRole && userRole.toLowerCase() === 'admin')) {
-      // Admins see everything
+      // Admins see everything — no filter
     } else if (userRole) {
       const normalizedRole = normalizeAudience(userRole);
       let roleFilter = `(LOWER(target_audience) IN ('all', 'all system users', ?))`;
@@ -105,22 +93,18 @@ const getAnnouncements = async (req, res) => {
       conditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
     }
 
-    if (conditions.length > 0) {
-      query += ` WHERE ` + conditions.join(' AND ');
-    }
+    if (conditions.length > 0) query += ` WHERE ` + conditions.join(' AND ');
     query += ` ORDER BY created_at DESC`;
 
     const [results] = await dbPromise.query(query, params);
     res.status(200).json({ success: true, announcements: results });
   } catch (error) {
-    console.error('Fetch Error:', error); // CHECK YOUR TERMINAL FOR THIS LOG
+    console.error('Fetch Error:', error);
     res.status(500).json({ error: 'Failed to retrieve announcements' });
   }
 };
 
-/**
- * UPDATE & DELETE
- */
+// UPDATE
 const updateAnnouncement = async (req, res) => {
   try {
     const { id } = req.params;
@@ -130,11 +114,32 @@ const updateAnnouncement = async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Update failed' }); }
 };
 
+// ✅ DELETE — only allow if author_id matches
 const deleteAnnouncement = async (req, res) => {
   try {
-    await dbPromise.query(`DELETE FROM announcements WHERE id = ?`, [req.params.id]);
+    const { id } = req.params;
+    const { author_id } = req.body;
+
+    // First check who owns this announcement
+    const [rows] = await dbPromise.query(
+      `SELECT author_id FROM announcements WHERE id = ?`, [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Announcement not found' });
+    }
+
+    // If author_id is provided, verify ownership
+    if (author_id && rows[0].author_id !== null && rows[0].author_id !== parseInt(author_id)) {
+      return res.status(403).json({ error: 'You can only delete your own announcements' });
+    }
+
+    await dbPromise.query(`DELETE FROM announcements WHERE id = ?`, [id]);
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: 'Delete failed' }); }
+  } catch (e) {
+    console.error('Delete Error:', e);
+    res.status(500).json({ error: 'Delete failed' });
+  }
 };
 
 module.exports = { createAnnouncement, getAnnouncements, updateAnnouncement, deleteAnnouncement };
