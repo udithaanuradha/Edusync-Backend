@@ -11,53 +11,35 @@ const router = express.Router();
   getCoordinatorGroups,
 } = require('../controllers/groupController');
 
-// If you have authentication middleware, it is highly recommended to include it here
-// const authMiddleware = require('../middleware/authMiddleware');
+// Routes for project groups. Base path: /api/groups
+// These endpoints are used by the coordinator UI and student dashboards.
 
+// Display groups (friendly listing)
 router.get('/display/:level', getGroupsByLevel);
+
+// Get a student's current group status
 router.get('/my-status/:studentId', getStudentGroup);
 
-/**
- * @route   GET /api/groups/student-group/:studentId/:level
- * @desc    Get group details for a specific student at a specific level
- */
+// Get group details for a specific student at a specific level
 router.get('/student-group/:studentId/:level', getStudentGroup);
 
-/**
- * @route   GET /api/groups/level/:level
- * @desc    Get groups by level (General Management)
- */
+// Admin/management: list groups by level
 router.get('/level/:level', getGroupsByLevel);
 
-/**
- * @route   GET /api/groups/coordinator/approved
- * @desc    Get all requests approved by the coordinator
- */
+// Get all coordinator-approved requests
 router.get('/coordinator/approved', getCoordinatorApprovedRequests);
 
-/**
- * @route   GET /api/groups/coordinator/:coordinatorId/:level
- * @desc    Get groups created by a specific coordinator at a specific level
- */
+// Get groups created by a specific coordinator
 router.get('/coordinator/:coordinatorId/:level', getCoordinatorGroups);
 
-/**
- * @route   POST /api/groups/create
- * @desc    Create a new project group
- */
+// Create a new project group
 router.post('/create', createGroup);
 
-/**
- * @route   PUT /api/groups/:id OR /api/groups/update/:id
- * @desc    Update group details
- */
+// Update group details (PUT is idempotent)
 router.put('/:id', updateGroup);
 router.put('/update/:id', updateGroup);
 
-/**
- * @route   DELETE /api/groups/:id OR /api/groups/delete/:id
- * @desc    Remove a group and its members
- */
+// Delete a group
 router.delete('/:id', deleteGroup);
 router.delete('/delete/:id', deleteGroup);
 

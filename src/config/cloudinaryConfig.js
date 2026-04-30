@@ -1,9 +1,9 @@
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const cloudinary = require('cloudinary');
+const CloudinaryStorage = require('multer-storage-cloudinary');
 const multer = require('multer');
 
 // 1. Connect to your Cloudinary account using the keys from your .env
-cloudinary.config({
+cloudinary.v2.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
@@ -15,21 +15,17 @@ console.log(`   API Key: ${process.env.CLOUDINARY_API_KEY ? '✅ Set' : '❌ Mis
 console.log(`   API Secret: ${process.env.CLOUDINARY_API_SECRET ? '✅ Set' : '❌ Missing'}`);
 
 // 2. Setup the storage engine
-const storage = new CloudinaryStorage({
+// NOTE: multer-storage-cloudinary@2.x exports a factory function and expects
+// callback-style option resolvers (not async params object).
+const storage = CloudinaryStorage({
   cloudinary: cloudinary,
-  params: async (req, file) => {
-    // Determine if the file is an image or a document based on its extension
+  params: (req, file, cb) => {
     const ext = file.originalname.split('.').pop().toLowerCase();
     const isImage = ['jpg', 'jpeg', 'png'].includes(ext);
-
-    return {
+    cb(null, {
       folder: 'edusync_guidelines',
-      // Images process as 'image', everything else (PDFs, DOCX, XLSX) processes as 'raw'
-      resource_type: isImage ? 'image' : 'raw', 
-      
-      // Note: We removed 'allowed_formats' from here because your 
-      // multer fileFilter (below) is already perfectly handling the security!
-    };
+      resource_type: isImage ? 'image' : 'raw',
+    });
   },
 });
 
