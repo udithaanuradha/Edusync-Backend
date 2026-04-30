@@ -449,14 +449,23 @@ const getStudentRequestStatus = async (req, res) => {
 
     const universityId = userRows[0].university_id;
 
+    if (!universityId) {
+      // If student has no university_id, they can only be found by student_id (leader)
+      const [results] = await dbPromise.query(
+        `SELECT * FROM group_requests WHERE student_id = ? ORDER BY created_at DESC`,
+        [studentId]
+      );
+      return res.json(results);
+    }
+
     // 2. Fetch requests where user is the leader OR their university_id is in the members_list
-    // IMPORTANT: Only check members_list if universityId is valid to prevent LIKE '%%' matching everything
+    // We use a more specific regex-like check for (ID) to avoid partial matches (e.g., 100 matching 1005)
     const [results] = await dbPromise.query(
       `SELECT * FROM group_requests 
        WHERE student_id = ? 
-          OR (? != '' AND ? IS NOT NULL AND members_list LIKE ?) 
+          OR (members_list REGEXP CONCAT('\\\\(', ?, '\\\\)'))
        ORDER BY created_at DESC`,
-      [studentId, universityId || '', universityId, `%${universityId}%`]
+      [studentId, universityId]
     );
 
     res.json(results);
