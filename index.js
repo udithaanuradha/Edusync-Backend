@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
 require("dotenv").config();
+const { validateUserCreation } = require("./src/utils/validators");
 
 const app = express();
 app.use(cors());
@@ -194,6 +195,9 @@ app.use("/api/marks", marksRoutes);
 // ✅ NEW: Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
+
+const mentorRoutes = require("./src/routes/mentorRoutes");
+app.use("/api/mentor", mentorRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
