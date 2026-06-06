@@ -4,9 +4,6 @@ const mysql = require("mysql2");
 require("dotenv").config();
 const { validateUserCreation } = require("./src/utils/validators");
 
-
-const { validateUserCreation } = require('./src/utils/validators');
-
 const app = express();
 app.use(cors());
 app.use(express.json());
