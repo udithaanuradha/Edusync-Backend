@@ -58,12 +58,16 @@ app.post("/api/login", (req, res) => {
 });
 
 app.post('/api/signup', async (req, res) => {
-    let { name, email, password, role, university_id, phone } = req.body;
+    let { name, email, password, role, university_id, phone, degree_program } = req.body;
 
     // If the role comes from the frontend as 'industry mentor', 
     // keep it exactly as 'industry mentor' for your database insert statement
-    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone) VALUES (?, ?, ?, ?, ?, ?)";
-    db.query(userSql, [name, email, password, role, university_id, phone], (err, result) => {
+    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, degree_program, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+
+    // Only students get level 1, all other roles get NULL
+    const levelValue = role === 'student' ? 1 : null;
+
+    db.query(userSql, [name, email, password, role, university_id, phone, degree_program || null, levelValue], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
 
         const newUserId = result.insertId; 
