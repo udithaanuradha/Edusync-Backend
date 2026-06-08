@@ -101,3 +101,16 @@ CREATE TABLE IF NOT EXISTS marks (
   CONSTRAINT fk_mark_stage FOREIGN KEY (stage_id) REFERENCES project_stages(stage_id),
   CONSTRAINT fk_mark_supervisor FOREIGN KEY (marked_by) REFERENCES users(id)
 );
+
+-- 6. Create the OTP Verification Table
+CREATE TABLE IF NOT EXISTS otp_verifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    otp_code VARCHAR(10) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_otp_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE
+);
