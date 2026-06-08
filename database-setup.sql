@@ -14,6 +14,10 @@ CREATE TABLE users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- For existing databases, run these once if constraints are missing:
+-- ALTER TABLE users ADD CONSTRAINT unique_email UNIQUE (email);
+-- ALTER TABLE users ADD CONSTRAINT unique_university_id UNIQUE (university_id);
+
 -- 2. Create the Project Stages Table
 CREATE TABLE project_stages (
     stage_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -22,7 +26,7 @@ CREATE TABLE project_stages (
     deadline DATE
 );
 
--- 3. Create the Group Requests Table
+-- 3. Create the Stage Files Table (For Guideline Documents)
 CREATE TABLE group_requests (
     request_id INT AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(255) NOT NULL,
@@ -32,37 +36,28 @@ CREATE TABLE group_requests (
     supervisor_id INT NOT NULL,
     status ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
     rejection_reason TEXT NULL,
-    is_final_submitted BOOLEAN DEFAULT FALSE,
-    project_level INT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_gr_student FOREIGN KEY (student_id) REFERENCES users(id),
     CONSTRAINT fk_gr_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id)
 );
+ALTER TABLE group_requests 
+ADD COLUMN is_final_submitted BOOLEAN DEFAULT FALSE;
+ALTER TABLE group_requests 
+ADD COLUMN project_level INT NOT NULL;
 
--- 4. Create the Project Groups Table (UPDATED & MERGED)
+-- 4. Create the Project Groups Table
 CREATE TABLE project_groups (
     id INT AUTO_INCREMENT PRIMARY KEY,
     group_name VARCHAR(255) NOT NULL,
     level INT NOT NULL,
     supervisor_id INT,
-    created_by INT,  -- Kept this so you can track which Coordinator made it!
+    created_by INT NOT NULL,  -- the coordinator who created the group
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_pg_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id) ON DELETE SET NULL,
-    CONSTRAINT fk_pg_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    CONSTRAINT fk_pg_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id),
+    CONSTRAINT fk_pg_created_by FOREIGN KEY (created_by) REFERENCES users(id)
 );
 
--- 5. Create the Group Members Table (NEW)
-CREATE TABLE group_members (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    group_id INT NOT NULL,
-    student_id INT NOT NULL,
-    is_leader BOOLEAN DEFAULT FALSE,
-    CONSTRAINT fk_gm_group FOREIGN KEY (group_id) REFERENCES project_groups(id) ON DELETE CASCADE,
-    CONSTRAINT fk_gm_student FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE KEY unique_student (student_id)
-);
-
--- 6. Create the Messages Table (For Communication Feature)
+-- 5. Create the Messages Table (For Communication Feature)
 CREATE TABLE IF NOT EXISTS messages (
     id INT AUTO_INCREMENT PRIMARY KEY,
     sender_id INT NOT NULL,
@@ -80,7 +75,7 @@ CREATE TABLE IF NOT EXISTS messages (
     INDEX idx_created (created_at)
 );
 
--- 7. Create the Supervisor Weekly Schedule Table
+-- 6. Create the Supervisor Weekly Schedule Table
 CREATE TABLE IF NOT EXISTS supervisorpartincalender (
     id INT AUTO_INCREMENT PRIMARY KEY,
     supervisor_id INT NOT NULL UNIQUE,
@@ -90,17 +85,19 @@ CREATE TABLE IF NOT EXISTS supervisorpartincalender (
     CONSTRAINT fk_supervisorpartincalender_supervisor
         FOREIGN KEY (supervisor_id) REFERENCES users(id) ON DELETE CASCADE
 );
-
--- 8. Create the Evaluation Panels Table (NEW - For Calendar Integration)
-CREATE TABLE evaluation_panels (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    evaluation_type VARCHAR(100) NOT NULL, 
-    academic_level VARCHAR(50) NOT NULL,   
-    target_group VARCHAR(100) NOT NULL,    
-    evaluators TEXT NOT NULL,              
-    panel_date DATE NOT NULL,              
-    start_time TIME NOT NULL,              
-    duration VARCHAR(50) NOT NULL,         
-    location VARCHAR(255),                 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+-- 6. Create the marks Table 
+CREATE TABLE IF NOT EXISTS marks (
+  mark_id INT AUTO_INCREMENT PRIMARY KEY,
+  group_id INT NOT NULL,
+  stage_id INT COMMENT 'NULL means overall grade',
+  marked_by INT NOT NULL COMMENT 'supervisor who gave the mark',
+  marks_obtained DECIMAL(5,2) NOT NULL,
+  total_marks DECIMAL(5,2) NOT NULL DEFAULT 100,
+  feedback TEXT,
+  mark_type ENUM('stage', 'overall') DEFAULT 'stage',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_mark_group FOREIGN KEY (group_id) REFERENCES project_groups(id),
+  CONSTRAINT fk_mark_stage FOREIGN KEY (stage_id) REFERENCES project_stages(stage_id),
+  CONSTRAINT fk_mark_supervisor FOREIGN KEY (marked_by) REFERENCES users(id)
 );
