@@ -3,6 +3,11 @@ const dbPromise = db.promise();
 
 let ensureMembersTablePromise = null;
 
+
+/**
+ * Ensures the 'project_group_members' table exists in the database.
+ * Uses a promise variable to prevent multiple redundant 'CREATE TABLE' checks.
+ */
 const ensureGroupMembersTable = async () => {
   if (!ensureMembersTablePromise) {
     ensureMembersTablePromise = dbPromise.query(`
@@ -21,25 +26,42 @@ const ensureGroupMembersTable = async () => {
   await ensureMembersTablePromise;
 };
 
+
+//--------------------------------------------------------------------------------------------------------------------------------
 // --- HELPER FUNCTIONS (PRESERVED) ---
+/**
+ * Regular expression helper to pull the project name from a raw text message
+ */
 const extractProjectName = (requestMessage) => {
   const text = String(requestMessage || '');
   const match = text.match(/Project:\s*([^\n.]+)/i);
   return match ? match[1].trim() : 'Untitled Project';
 };
 
+
+/**
+ * Regular expression helper to identify the leader's name from a formatted members list
+ */
 const extractLeaderName = (membersList) => {
   const text = String(membersList || '');
   const match = text.match(/Leader:\s*([^,\n]+)/i);
   return match ? match[1].trim() : 'Not provided';
 };
 
+
+/**
+ * Regular expression helper to extract up to 5 unique University IDs (5-8 digits) from text
+ */
 const extractMemberIndexes = (membersList) => {
   const text = String(membersList || '');
   const matches = text.match(/\b\d{5,8}[A-Za-z]?\b/g) || [];
   return [...new Set(matches.map((item) => item.toUpperCase()))].slice(0, 5);
 };
 
+
+/**
+ * Helper to parse names from a list, removing keywords like 'Leader' or 'Member'
+ */
 const extractMemberNames = (membersList) => {
   const text = String(membersList || '');
   const normalized = text.replace(/\bLeader:\s*/gi, '').replace(/\bMembers?:\s*/gi, '');
@@ -49,16 +71,25 @@ const extractMemberNames = (membersList) => {
   return [...new Set(tokens)].slice(0, 5);
 };
 
+//--------------------------------------------------------------------------------------------------------------------------------
 // --- CONTROLLER FUNCTIONS ---
 
-const getGroupsByLevel = async (req, res) => {
-  const level = Number(req.params.level);
-  console.log(`🔍 Fetching ALL groups for Level: ${level}`);
-  
-  try {
-    await ensureGroupMembersTable();
 
-    // 1. Get the Groups
+
+
+
+
+/**
+ * GET: Retrieves all project groups based on a specific academic level
+ */
+     const getGroupsByLevel = async (req, res) => {
+     const level = Number(req.params.level);
+     console.log(`🔍 Fetching ALL groups for Level: ${level}`);
+  
+     try {
+        await ensureGroupMembersTable();
+
+//Fetch group metadata and supervisor names for the level
     const [groups] = await dbPromise.query(
       `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor
        FROM project_groups pg
@@ -76,7 +107,9 @@ const getGroupsByLevel = async (req, res) => {
 
     const groupIds = groups.map((g) => g.groupId);
 
-    // 2. Get all members for these groups with more details
+
+
+    //Fetch detailed user info for all students in those groups
     const [members] = await dbPromise.query(
       `SELECT gm.group_id, u.id, u.name, u.university_id, gm.is_leader
        FROM project_group_members gm
@@ -120,6 +153,17 @@ const getGroupsByLevel = async (req, res) => {
   }
 };
 
+
+
+
+
+
+
+
+/**
+ * GET: Fetches the specific group(s) a student belongs to
+ */
+
 const getStudentGroup = async (req, res) => {
   const studentId = req.params.studentId;
   const level = req.params.level ? Number(req.params.level) : null;
@@ -128,9 +172,9 @@ const getStudentGroup = async (req, res) => {
 
   try {
     await ensureGroupMembersTable();
-
-    // 1. Find the group(s) this student belongs to at the specified level
-    // We use a more flexible query to handle potential column casing (e.g. student_Id vs student_id)
+    
+    //  Join groups with members table to find where student_id matches and optionally filter by level
+    
     const [userGroups] = await dbPromise.query(
       `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor, pg.level
        FROM project_groups pg
@@ -192,12 +236,24 @@ const getStudentGroup = async (req, res) => {
   }
 };
 
+
+
+
+
+
+
+/**
+ * GET: Fetches requests approved by supervisors that are ready for coordinator review
+ */
+
 const getCoordinatorApprovedRequests = async (req, res) => {
   const rawLevel = req.query.level;
   const level = rawLevel === undefined ? null : Number(rawLevel);
   const finalOnly = String(req.query.finalOnly || '0') === '1' ? 1 : 0;
 
   try {
+
+    // 1. Get all approved requests with optional filters for final submission and level
     const [rows] = await dbPromise.query(
       `SELECT gr.*, student.name AS student_name, student.level AS student_level, supervisor.name AS supervisor_name
        FROM group_requests gr
@@ -210,6 +266,7 @@ const getCoordinatorApprovedRequests = async (req, res) => {
       [finalOnly, level, level]
     );
 
+// Business Logic: Resolve the raw member list into actual database user records
     const data = await Promise.all(rows.map(async (row) => {
       const normalizedLevel = Number(row.project_level ?? row.student_level ?? 0);
       const indexes = extractMemberIndexes(row.members_list);
@@ -217,6 +274,7 @@ const getCoordinatorApprovedRequests = async (req, res) => {
 
       if (indexes.length > 0 && normalizedLevel > 0) {
         const [memberRows] = await dbPromise.query(
+          //Find students matching the university IDs extracted from the request
           `SELECT id, name, university_id, email, level FROM users
            WHERE role = 'student' AND level = ? AND university_id IN (?)`,
           [normalizedLevel, indexes]
@@ -242,7 +300,14 @@ const getCoordinatorApprovedRequests = async (req, res) => {
   }
 };
 
-const createGroup = async (req, res) => {
+
+
+
+
+//create group function with transaction to ensure group and members  
+
+
+  const createGroup = async (req, res) => {
   const { groupName, level, supervisorId, leaderId, memberIds, createdBy } = req.body;
   let connection;
   try {
@@ -270,9 +335,12 @@ const createGroup = async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to create group.' });
   } finally {
     if (connection) connection.release();
-  }
-};
+  }};
 
+
+
+
+// update group details and members 
 const updateGroup = async (req, res) => {
   const groupId = req.params.id;
   const { groupName, level, supervisorId } = req.body;
@@ -287,6 +355,10 @@ const updateGroup = async (req, res) => {
   }
 };
 
+
+
+
+//delete group details and members 
 const deleteGroup = async (req, res) => {
   const groupId = req.params.id;
   try {
@@ -297,6 +369,10 @@ const deleteGroup = async (req, res) => {
     res.status(500).json({ success: false, error: 'Delete failed.' });
   }
 };
+
+
+
+//Fetches all groups managed by a specific coordinator
 
 const getCoordinatorGroups = async (req, res) => {
   const coordinatorId = req.params.coordinatorId;
@@ -324,7 +400,7 @@ const getCoordinatorGroups = async (req, res) => {
 
     const groupIds = groups.map((g) => g.groupId);
 
-    // 2. Get all members for these groups
+    // 2. Get all members for these groups that resalt set
     const [members] = await dbPromise.query(
       `SELECT gm.group_id, u.name, gm.is_leader
        FROM project_group_members gm
@@ -362,6 +438,13 @@ const getCoordinatorGroups = async (req, res) => {
   }
 };
 
+
+
+
+
+
+//Retrieves a list of members for a specific group  
+
 const getGroupMembers = async (req, res) => {
   const groupId = req.params.groupId;
   const userId = req.headers['x-user-id'];
@@ -372,7 +455,7 @@ const getGroupMembers = async (req, res) => {
   try {
     await ensureGroupMembersTable();
 
-    // Access Control
+    //  If user is a student, verify they actually belong to the group they are requesting
     if (userId && userRole === 'student') {
       const [membership] = await dbPromise.query(
         'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ?',
@@ -383,6 +466,8 @@ const getGroupMembers = async (req, res) => {
       }
     }
 
+    
+//Fetch all member details for the target group
     const [members] = await dbPromise.query(
       `SELECT gm.group_id AS group_id, u.id AS id, u.name AS name, gm.is_leader AS is_leader
        FROM project_group_members gm
@@ -399,6 +484,11 @@ const getGroupMembers = async (req, res) => {
   }
 };
 
+
+
+/**
+ * GET: Returns all users who have the 'supervisor' role
+ */
 const getSupervisors = async (req, res) => {
   try {
     const [results] = await dbPromise.query("SELECT id, name FROM users WHERE role = 'supervisor' ORDER BY name ASC");
@@ -407,6 +497,14 @@ const getSupervisors = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+
+
+
+
+/**
+ * POST: Submits a new group request for supervisor approval
+ */
 
 const createGroupRequest = async (req, res) => {
   const { group_name, members_list, request_message, student_id, supervisor_id, project_level } = req.body;
@@ -420,6 +518,14 @@ const createGroupRequest = async (req, res) => {
   }
 };
 
+
+
+
+
+
+/**
+ * POST: Finalizes a supervisor-approved request for Coordinator review
+ */
 const finalSubmitRequest = async (req, res) => {
   const { request_id } = req.body;
   try {
@@ -433,6 +539,14 @@ const finalSubmitRequest = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+
+
+
+
+/**
+ * GET: Checks the status of group requests where the student is either the leader or a member
+ */
 
 const getStudentRequestStatus = async (req, res) => {
   const { studentId } = req.params;
@@ -459,7 +573,7 @@ const getStudentRequestStatus = async (req, res) => {
     }
 
     // 2. Fetch requests where user is the leader OR their university_id is in the members_list
-    // We use a more specific regex-like check for (ID) to avoid partial matches (e.g., 100 matching 1005)
+    
     const [results] = await dbPromise.query(
       `SELECT * FROM group_requests 
        WHERE student_id = ? 
@@ -488,4 +602,4 @@ module.exports = {
   createGroupRequest,
   finalSubmitRequest,
   getStudentRequestStatus
-};
+};

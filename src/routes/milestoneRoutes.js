@@ -16,15 +16,15 @@ const {
   getOverviewByGroup
 } = require('../controllers/milestoneController');
 
-// =======================
+ 
 // PROJECT OVERVIEW ROUTES
-// =======================
+ 
 router.post('/overview', upsertOverview);
 router.get('/overview/group/:groupId', getOverviewByGroup);
 
-// =======================
+ 
 // MILESTONE ROUTES
-// =======================
+ 
 
 // Create a new milestone
 router.post('/', createMilestone);
@@ -38,9 +38,11 @@ router.put('/:id/status', updateMilestoneStatus);
 // Delete a milestone
 router.delete('/:id', deleteMilestone);
 
-// =======================
+
+
+ 
 // TASK ROUTES
-// =======================
+ 
 
 // Create a new task within a milestone
 router.post('/tasks', createStudentTask);

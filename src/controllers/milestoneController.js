@@ -55,8 +55,14 @@ const ensureMilestoneTables = async () => {
   }
   await ensureTablesPromise;
 };
+ 
 
-// --- ACCESS CONTROL HELPER ---
+
+//   ACCESS CONTROL HELPER ---
+/**
+ * Checks if a specific user has permission to view/edit group data.
+ * Coordinators/Supervisors pass automatically; Students must be in the group.
+ */
 const verifyMembership = async (userId, userRole, groupId) => {
   // If not a student, we allow access for now (Coordinator, Supervisor, Admin)
   if (userRole !== 'student') return true;
@@ -68,9 +74,21 @@ const verifyMembership = async (userId, userRole, groupId) => {
   return rows.length > 0;
 };
 
-// ==========================================
+
+
+
+
+
+
+
+
+
+ 
 // MILESTONE CONTROLLERS
-// ==========================================
+ /**
+ * POST: Create a new project phase (Milestone)
+ * Restricted to group members only.
+ */
 
 const createMilestone = async (req, res) => {
   try {
@@ -102,6 +120,12 @@ const createMilestone = async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to create milestone.' });
   }
 };
+
+
+
+
+
+//Fetch all phases for a specific project group.
 
 const getMilestonesByGroup = async (req, res) => {
   try {
@@ -136,6 +160,9 @@ const getMilestonesByGroup = async (req, res) => {
   }
 };
 
+
+
+//Supervisor approves or rejects a milestone with feedback reason. Only Supervisors, Coordinators, or Admins can perform this action.
 const updateMilestoneStatus = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -160,6 +187,12 @@ const updateMilestoneStatus = async (req, res) => {
   }
 };
 
+
+
+/**
+ * DELETE: Remove a milestone (and all its tasks via Cascade).
+ */
+
 const deleteMilestone = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -183,10 +216,22 @@ const deleteMilestone = async (req, res) => {
 };
 
 
-// ==========================================
-// STUDENT TASKS CONTROLLERS
-// ==========================================
 
+
+
+
+
+
+
+ 
+// STUDENT TASKS CONTROLLERS
+
+
+
+ 
+/**
+ * POST: Create a specific work item within a Milestone.
+ */
 const createStudentTask = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -204,7 +249,7 @@ const createStudentTask = async (req, res) => {
       const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
       if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
-
+    // Insert task assigned to a specific user ID
     const [result] = await dbPromise.query(
       `INSERT INTO student_tasks (milestone_id, assigned_to, task_name, description, due_date) VALUES (?, ?, ?, ?, ?)`,
       [milestone_id, assigned_to, task_name, description || null, due_date || null]
@@ -217,19 +262,28 @@ const createStudentTask = async (req, res) => {
   }
 };
 
+
+
+
+
+/**
+ * GET: Fetch tasks assigned to a specific student.
+ */
+
 const getTasksByMilestone = async (req, res) => {
   try {
     await ensureMilestoneTables();
     const { milestoneId } = req.params;
     const userId = req.headers['x-user-id'];
     const userRole = req.headers['x-user-role'];
-
-    // Access Control
+ 
+// Security: You can't spy on other students' tasks
     const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [milestoneId]);
     if (mRows.length > 0 && userId && userRole === 'student') {
       const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
       if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
+ // Join with milestones and tasks to show which phase the task belongs to
       `SELECT t.*, u.name AS assigned_to_name 
        FROM student_tasks t
        LEFT JOIN users u ON t.assigned_to = u.id
@@ -243,6 +297,10 @@ const getTasksByMilestone = async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
   }
 };
+
+
+
+
 
 const getTasksByStudent = async (req, res) => {
   try {
@@ -284,7 +342,14 @@ const getTasksByStudent = async (req, res) => {
   }
 };
 
+
+
+
+
+
 // Strict group-scoped "My Tasks" — only tasks from the student's specific group project
+
+
 const getTasksByStudentAndGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -312,6 +377,11 @@ const getTasksByStudentAndGroup = async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to fetch tasks.' });
   }
 };
+
+
+
+
+
 
 const getTasksByGroup = async (req, res) => {
   try {
@@ -347,6 +417,18 @@ const getTasksByGroup = async (req, res) => {
   }
 };
 
+
+
+
+
+
+
+
+/**
+ * PATCH: Update the progress status (TODO, IN_PROGRESS, COMPLETED).
+ * Security: Students can ONLY update tasks assigned to themselves.
+  */
+
 const updateTaskStatus = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -376,6 +458,14 @@ const updateTaskStatus = async (req, res) => {
   }
 };
 
+
+
+
+
+
+
+
+// delete task 
 const deleteTask = async (req, res) => {
   try {
     await ensureMilestoneTables();
@@ -389,9 +479,17 @@ const deleteTask = async (req, res) => {
   }
 };
 
-// ==========================================
+  
+
+
+
+
+
 // PROJECT OVERVIEW CONTROLLERS
-// ==========================================
+ /**
+ * POST: Save or Update the project duration and workflow type.
+ * Uses "ON DUPLICATE KEY UPDATE" to handle both create and update in one query.
+ */
 
 const upsertOverview = async (req, res) => {
   try {
@@ -423,6 +521,14 @@ const upsertOverview = async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to save overview.' });
   }
 };
+
+
+
+
+
+/**
+ * GET: Retrieve the high-level project timeline for a group.
+ */
 
 const getOverviewByGroup = async (req, res) => {
   try {
