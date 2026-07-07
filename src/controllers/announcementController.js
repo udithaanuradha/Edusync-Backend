@@ -12,6 +12,11 @@ const firstNonEmptyString = (...values) => {
   return '';
 };
 
+/**
+ * Ensures the table exists. 
+ * Moved to a self-invoking pattern or one-time check for performance.
+ */
+let isTableReady = false;
 const ensureAnnouncementsTable = async () => {
   if (!ensureAnnouncementsTablePromise) {
     ensureAnnouncementsTablePromise = (async () => {
@@ -72,35 +77,98 @@ const getAnnouncements = async (req, res) => {
     let params = [];
     let conditions = [];
 
-    if (allAudienceOnly || (userRole && userRole.toLowerCase() === 'admin')) {
-      // Admins see everything — no filter
-    } else if (userRole) {
-      const normalizedRole = normalizeAudience(userRole);
-      let roleFilter = `(LOWER(target_audience) IN ('all', 'all system users', ?))`;
-      params.push(normalizedRole);
+    // 1. Management/Admin View
+    if (all_audience === 'true' || (role && role.toLowerCase() === 'admin')) {
+      // No extra conditions, fetch all
+    } 
+    // 2. Author Specific
+    else if (author) {
+      conditions.push(`author_name = ?`);
+      params.push(author);
+    }
+    // 3. Role-Based Relevance
+    else if (role) {
+      const userRole = normalizeAudience(role);
+      const userLevel = level ? normalizeAudience(`Level${level}`) : null;
 
-      if (userLevel) {
-        roleFilter = `(LOWER(target_audience) IN ('all', 'all system users', ?) OR LOWER(target_audience) LIKE ?)`;
-        params.push(`%level${userLevel}%`);
-      }
-      conditions.push(roleFilter);
-
-      if (currentUserId) {
-        conditions.push(`(author_id IS NULL OR author_id != ?)`);
+    // 1. Fetch all announcements for management page (all_audience=true)
+    if (allAudienceOnly) {
+      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+    }
+    // 2. Fetch announcements by author name
+    else if (authorName) {
+      query = `SELECT * FROM announcements WHERE author_name = ? ORDER BY created_at DESC`;
+      params.push(authorName);
+    }
+    // 3. SUPER ADMIN: Sees absolutely every announcement
+    else if (userRole && userRole.toLowerCase() === 'admin') {
+      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+    }
+    // 4. COORDINATOR: Uses "Rule of Relevance"
+    // Sees: Global posts + Coordinator-targeted posts (but NOT their own posts on dashboard)
+    else if (userRole && userRole.toLowerCase() === 'coordinator') {
+      query = `
+        SELECT * FROM announcements 
+        WHERE (LOWER(target_audience) IN ('all', 'all system users') 
+           OR LOWER(target_audience) LIKE ?)
+      `;
+      params.push('%coordinator%');
+      
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
         params.push(currentUserId);
       }
-    } else {
-      conditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
+      
+      query += ` ORDER BY created_at DESC`;
+    }
+    // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
+    // Sees: Global posts + posts targeted to their role/level (but NOT their own posts on dashboard)
+    else if (userRole) {
+      const normalizedRole = normalizeAudience(userRole);
+      const normalizedLevelAudience = userLevel ? normalizeAudience(`Level${userLevel}`) : '';
+
+      if (userLevel) {
+        roleFilter += ` OR LOWER(target_audience) LIKE ?`;
+        params.push(`%${userLevel}%`);
+      }
+      
+      // Coordinators also see posts they authored even if not targeted to them
+      if (userRole === 'coordinator' && name) {
+        roleFilter += ` OR author_name = ?`;
+        params.push(name);
+      }
+
+      conditions.push(`(${roleFilter})`);
     }
 
-    if (conditions.length > 0) query += ` WHERE ` + conditions.join(' AND ');
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
+        params.push(currentUserId);
+      }
+      
+      query += ' ORDER BY created_at DESC';
+    }
+    // 6. Fallback: No valid parameters provided
+    else {
+      query = `SELECT * FROM announcements WHERE LOWER(target_audience) IN ('all', 'all system users')`;
+      
+      // Exclude current user's posts from dashboard view
+      if (currentUserId && currentUserId > 0) {
+        query += ` AND (author_id IS NULL OR author_id != ?)`;
+        params.push(currentUserId);
+      }
+      
+      query += ` ORDER BY created_at DESC`;
+    }
+
     query += ` ORDER BY created_at DESC`;
 
     const [results] = await dbPromise.query(query, params);
     res.status(200).json({ success: true, announcements: results });
   } catch (error) {
-    console.error('Fetch Error:', error);
-    res.status(500).json({ error: 'Failed to retrieve announcements' });
+    return res.status(500).json({ error: 'Failed to retrieve announcements' });
   }
 };
 
