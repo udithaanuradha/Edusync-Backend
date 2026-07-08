@@ -105,5 +105,35 @@ const getUsersByRole = (req, res) => {
   });
 };
 
+// Get all students for a specific level (for dropdowns)
+const getStudentsByLevel = (req, res) => {
+  const level = req.params.level;
+
+  if (!level) {
+    return res.status(400).json({ error: "Please provide an Academic Level." });
+  }
+
+  const sql = `
+        SELECT id, name, university_id 
+        FROM users 
+        WHERE role = 'student' AND level = ?
+        ORDER BY name ASC
+    `;
+
+  db.query(sql, [level], (err, results) => {
+    if (err) {
+      console.error("Error fetching students by level:", err);
+      return res.status(500).json({ error: "Failed to fetch students." });
+    }
+
+    res.status(200).json(results);
+  });
+};
+
 // Export the function so the router can use it
-module.exports = { searchStudentForGroup, searchSupervisors, getUsersByRole };
+module.exports = {
+  searchStudentForGroup,
+  searchSupervisors,
+  getUsersByRole,
+  getStudentsByLevel,
+};

@@ -1,4 +1,4 @@
-const express = require("express");
+ const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
 require("dotenv").config();
@@ -62,10 +62,10 @@ app.post('/api/signup', async (req, res) => {
 
     // If the role comes from the frontend as 'industry mentor', 
     // keep it exactly as 'industry mentor' for your database insert statement
-        const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-        const levelValue = role === 'student' ? 1 : null;
+    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    const levelValue = role === 'student' ? 1 : null;
 
-        db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue], (err, result) => {
+    db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
 
         const newUserId = result.insertId; 
@@ -256,6 +256,11 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+// Milestones & Tasks (Combined from HEAD)
+const milestoneRoutes = require("./src/routes/milestoneRoutes");
+app.use("/api/milestones", milestoneRoutes);
+
+// Dashboard & Marks (Combined from develop)
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 app.use("/api/dashboard", dashboardRoutes);
 
