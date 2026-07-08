@@ -34,7 +34,7 @@ app.post("/api/login", (req, res) => {
     return res.status(400).json({ error: "Email and password required" });
 
   db.query(
-    "SELECT id, name, email, role, level FROM users WHERE email = ? AND password = ?",
+    "SELECT id, name, email, role, level ,designation FROM users WHERE email = ? AND password = ?",
     [email, password],
     (err, results) => {
       if (err) return res.status(500).json({ error: "Internal server error" });
@@ -65,10 +65,27 @@ app.post('/api/signup', async (req, res) => {
 
     // If the role comes from the frontend as 'industry mentor', 
     // keep it exactly as 'industry mentor' for your database insert statement
-    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-    const levelValue = role === 'student' ? 1 : null;
+    // Level only applies to students
+const levelValue = role === 'student' ? 1 : null;
 
-    db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue], (err, result) => {
+// Designation rules:
+//   lecturer      → 'supervisor' by default
+//                   admin can later change to 'coordinator'
+//   student       → NULL (never has a designation)
+//   admin         → NULL (never has a designation)
+//   industry mentor → NULL (never has a designation)
+const designationValue = role === 'lecturer' ? 'supervisor' : null;
+
+const userSql = `
+  INSERT INTO users 
+    (name, email, password, role, university_id, phone, academic_unit, level, designation) 
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`;
+
+db.query(
+  userSql,
+  [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue],
+  (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
 
         const newUserId = result.insertId; 

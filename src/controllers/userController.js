@@ -134,10 +134,15 @@ const assignCoordinator = (req, res) => {
       }
 
       
+      // Give 'supervisor' designation to all lecturers
+      // who don't have any designation assigned yet.
+      // Only touches lecturers — other roles are
+      // protected by WHERE role = 'lecturer'
       const updateSupervisorsSql = `
-        UPDATE users 
-        SET designation = 'supervisor' 
-        WHERE role = 'lecturer' AND designation IS NULL
+       UPDATE users 
+       SET designation = 'supervisor' 
+       WHERE role = 'lecturer' 
+       AND (designation IS NULL OR designation = '')
       `;
 
       db.query(updateSupervisorsSql, [], (err, supervisorResults) => {
