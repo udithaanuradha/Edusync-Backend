@@ -11,53 +11,6 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Validation Helper ---
-const VALID_ROLES = ['student', 'supervisor', 'coordinator', 'admin', 'mentor', 'industry mentor'];
-
-const validateUserCreation = ({ firstName, lastName, email, password, role, universityId }) => {
-  const errors = [];
-
-  // Validate first name
-  if (!firstName || firstName.length < 2) {
-    errors.push('First name must be at least 2 characters long');
-  } else if (!/^[a-zA-Z\s'-]+$/.test(firstName)) {
-    errors.push('First name can only contain letters, spaces, hyphens, and apostrophes');
-  }
-
-  // Validate last name
-  if (!lastName || lastName.length < 2) {
-    errors.push('Last name must be at least 2 characters long');
-  } else if (!/^[a-zA-Z\s'-]+$/.test(lastName)) {
-    errors.push('Last name can only contain letters, spaces, hyphens, and apostrophes');
-  }
-
-  // Validate email
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    errors.push('Please provide a valid email address');
-  }
-
-  // Validate password
-  if (!password || password.length < 6) {
-    errors.push('Password must be at least 6 characters long');
-  }
-
-  // Validate role
-  if (!role || !VALID_ROLES.includes(role)) {
-    errors.push(`Role must be one of: ${VALID_ROLES.join(', ')}`);
-  }
-
-  // Validate university ID for students
-  if (role === 'student') {
-    if (!universityId || !/^[a-zA-Z0-9]{3,}$/.test(universityId)) {
-      errors.push('University ID must be at least 3 alphanumeric characters');
-    }
-  }
-
-  return {
-    valid: errors.length === 0,
-    errors
-  };
-};
-
 // --- 1. Cloudinary Configuration ---
 const { upload } = require("./src/config/cloudinaryConfig");
 console.log("✅ Cloudinary configured for file uploads");
