@@ -1,8 +1,19 @@
 const db = require('../config/db');
 
-const getStagesByLevel = (level, callback) => {
-    // First get all stages for this level
-    db.query('SELECT * FROM project_stages WHERE level = ? ORDER BY stage_id', [level], (err, stages) => {
+const getStagesByLevel = (level, coordinatorId, callback) => {
+    // First get all stages for this level created by this coordinator
+    let query = 'SELECT * FROM project_stages WHERE level = ?';
+    let params = [level];
+    
+    // If coordinatorId is provided, filter by created_by
+    if (coordinatorId) {
+        query += ' AND created_by = ?';
+        params.push(coordinatorId);
+    }
+    
+    query += ' ORDER BY stage_id';
+    
+    db.query(query, params, (err, stages) => {
         if (err) return callback(err, null);
         
         // Then get all files for each stage
@@ -24,7 +35,7 @@ const getStagesByLevel = (level, callback) => {
             // Attach files to their stages
             const stagesWithFiles = stages.map(stage => ({
                 ...stage,
-                files: files.filter(f => f.stage_id === stage.stage_id)
+                files: files.filter(f => String(f.stage_id) === String(stage.stage_id))
             }));
 
             callback(null, stagesWithFiles);
@@ -37,11 +48,21 @@ const getStageById = (id, callback) => {
 };
 
 const createStage = (data, callback) => {
-    const { level, stage_name, description, deadline, created_by } = data;
+    const {
+        level,
+        stage_name,
+        description,
+        deadline,
+        created_by,
+        resource_links,
+        resource_link,
+        mentor_details_url,
+    } = data;
+    const linkValue = resource_links ?? resource_link ?? mentor_details_url ?? null;
     db.query(
-        `INSERT INTO project_stages (level, stage_name, description, deadline, created_by)
-         VALUES (?, ?, ?, ?, ?)`,
-        [level, stage_name, description, deadline || null, created_by],
+        `INSERT INTO project_stages (level, stage_name, description, deadline, created_by, resource_links)
+         VALUES (?, ?, ?, ?, ?, ?)` ,
+        [level, stage_name, description, deadline || null, created_by, linkValue],
         callback
     );
 };
@@ -74,10 +95,11 @@ const deleteStage = (id, callback) => {
 };
 
 const updateStage = (id, data, callback) => {
-    const { stage_name, description, deadline } = data;
+    const { stage_name, description, deadline, resource_link, resource_links, mentor_details_url } = data;
+    const linkValue = resource_links ?? resource_link ?? mentor_details_url ?? null;
     db.query(
-        'UPDATE project_stages SET stage_name=?, description=?, deadline=? WHERE stage_id=?',
-        [stage_name, description, deadline || null, id],
+        'UPDATE project_stages SET stage_name=?, description=?, deadline=?, resource_links=? WHERE stage_id=?',
+        [stage_name, description, deadline || null, linkValue, id],
         callback
     );
 };

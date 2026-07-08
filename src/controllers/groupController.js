@@ -1,4 +1,4 @@
- const db = require('../config/db');
+const db = require('../config/db');
 const dbPromise = db.promise();
 
 let ensureMembersTablePromise = null;
@@ -53,22 +53,29 @@ const extractMemberNames = (membersList) => {
 
 const getGroupsByLevel = async (req, res) => {
   const level = Number(req.params.level);
-  console.log(`🔍 Fetching ALL groups for Level: ${level}`);
+  const coordinatorId = req.query.coordinatorId; // Extract from query string
+  console.log(`🔍 Fetching groups for Level: ${level}${coordinatorId ? ` created by Coordinator: ${coordinatorId}` : ' (ALL coordinators)'}`);
   
   try {
     await ensureGroupMembersTable();
 
-    // 1. Get the Groups
-    const [groups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor
-       FROM project_groups pg
-       LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.level = ?
-       ORDER BY pg.id DESC`,
-      [level]
-    );
+    // 1. Get the Groups - filter by coordinator if provided
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor
+                     FROM project_groups pg
+                     LEFT JOIN users u ON u.id = pg.supervisor_id
+                     WHERE pg.level = ?`;
+    let params = [level];
+    
+    if (coordinatorId) {
+      groupQuery += ` AND pg.created_by = ?`;
+      params.push(coordinatorId);
+    }
+    
+    groupQuery += ` ORDER BY pg.id DESC`;
+    
+    const [groups] = await dbPromise.query(groupQuery, params);
 
-    console.log(`📊 Found ${groups.length} groups for Level ${level}.`);
+    console.log(`📊 Found ${groups.length} groups for Level ${level}${coordinatorId ? ` by Coordinator ${coordinatorId}` : ''}.`);
 
     if (!groups.length) {
       return res.json([]); // Return empty array if no groups
@@ -207,16 +214,20 @@ const getCoordinatorApprovedRequests = async (req, res) => {
   const finalOnly = String(req.query.finalOnly || '0') === '1' ? 1 : 0;
 
   try {
+    // Build the WHERE clause dynamically
+    let whereCondition = `gr.status = 'approved'
+         AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
+         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)`;
+    let params = [finalOnly, level, level];
+
     const [rows] = await dbPromise.query(
       `SELECT gr.*, student.name AS student_name, student.level AS student_level, supervisor.name AS supervisor_name
        FROM group_requests gr
        LEFT JOIN users student ON student.id = gr.student_id
        LEFT JOIN users supervisor ON supervisor.id = gr.supervisor_id
-       WHERE gr.status = 'approved'
-         AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
-         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)
+       WHERE ${whereCondition}
        ORDER BY gr.created_at DESC`,
-      [finalOnly, level, level]
+      params
     );
 
     const data = await Promise.all(rows.map(async (row) => {
@@ -252,7 +263,16 @@ const getCoordinatorApprovedRequests = async (req, res) => {
 };
 
 const createGroup = async (req, res) => {
-  const { groupName, level, supervisorId, leaderId, memberIds, createdBy } = req.body;
+  const {
+    groupName,
+    level,
+    supervisorId,
+    leaderId,
+    memberIds,
+    createdBy,
+    created_by,
+  } = req.body;
+  const coordinatorId = createdBy ?? created_by ?? null;
   let connection;
   try {
     await ensureGroupMembersTable();
@@ -261,7 +281,7 @@ const createGroup = async (req, res) => {
 
     const [groupInsert] = await connection.query(
       `INSERT INTO project_groups (group_name, level, supervisor_id, created_by) VALUES (?, ?, ?, ?)`,
-      [groupName, level, supervisorId || null, createdBy]
+      [groupName, level, supervisorId || null, coordinatorId]
     );
 
     const groupId = groupInsert.insertId;
@@ -357,12 +377,13 @@ const getCoordinatorGroups = async (req, res) => {
         groupId: group.groupId,
         groupName: group.groupName,
         supervisor: group.supervisor || 'Not Assigned',
-        leader: leader ? leader.name : (groupMembers[0] || 'Not Assigned'),
-        members: groupMembers // This is the array for .join(', ')
+        leaderName: leader ? leader.name : (groupMembers[0] || 'Not Assigned'),
+        memberCount: groupMembers.length,
+        members: groupMembers,
+        status: 'Active'
       };
     });
 
-    // CRITICAL: Send only the array so frontend can use .map()
     return res.json(formattedData);
 
   } catch (error) {

@@ -1,9 +1,11 @@
-const cloudinary = require('cloudinary');
+const { v2: cloudinary } = require('cloudinary');
 const CloudinaryStorage = require('multer-storage-cloudinary');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 
 // 1. Connect to your Cloudinary account using the keys from your .env
-cloudinary.v2.config({
+cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET
@@ -15,19 +17,14 @@ console.log(`   API Key: ${process.env.CLOUDINARY_API_KEY ? '✅ Set' : '❌ Mis
 console.log(`   API Secret: ${process.env.CLOUDINARY_API_SECRET ? '✅ Set' : '❌ Missing'}`);
 
 // 2. Setup the storage engine
-// NOTE: multer-storage-cloudinary@2.x exports a factory function and expects
-// callback-style option resolvers (not async params object).
-const storage = CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: (req, file, cb) => {
-    const ext = file.originalname.split('.').pop().toLowerCase();
-    const isImage = ['jpg', 'jpeg', 'png'].includes(ext);
-    cb(null, {
-      folder: 'edusync_guidelines',
-      resource_type: isImage ? 'image' : 'raw',
-    });
-  },
-});
+// Keep the Cloudinary client initialized for future use, but use local disk
+// storage for uploads so stage creation does not depend on external network calls.
+const uploadDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.memoryStorage();
 
 const upload = multer({ 
   storage: storage,

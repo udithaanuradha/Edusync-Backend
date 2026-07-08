@@ -7,9 +7,17 @@ const toNumber = (value) => {
 
 const getCoordinatorSummary = async (req, res) => {
   try {
+    // Extract coordinatorId from query parameters
+    const coordinatorId = req.query.coordinatorId;
+    
+    // Build WHERE clause for filtering by coordinator (if coordinatorId is provided)
+    const hasCoordinatorFilter = !!coordinatorId;
+    const coordinatorParams = coordinatorId ? [coordinatorId] : [];
+
     const totalProjectsQuery = `
       SELECT COUNT(*) AS totalProjects
       FROM project_groups
+      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
     `;
 
     const activeStudentsQuery = `
@@ -36,6 +44,7 @@ const getCoordinatorSummary = async (req, res) => {
         FROM evaluation_panels ep
         LEFT JOIN project_groups pg ON pg.group_name = ep.target_group
         WHERE ep.panel_date >= CURDATE()
+          ${hasCoordinatorFilter ? 'AND pg.created_by = ?' : ''}
       )
       SELECT COUNT(DISTINCT panel_id) AS pendingEvaluations
       FROM panel_groups pg_info
@@ -60,6 +69,7 @@ const getCoordinatorSummary = async (req, res) => {
           WHERE mark_type = 'stage'
           GROUP BY group_id
         ) mark_summary ON mark_summary.group_id = pg.id
+        ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
       ) completed_groups
       WHERE completed_groups.totalStages > 0
         AND completed_groups.marked_stages >= completed_groups.totalStages
@@ -94,6 +104,7 @@ const getCoordinatorSummary = async (req, res) => {
         WHERE mark_type = 'stage'
         GROUP BY group_id
       ) progress ON progress.group_id = pg.id
+      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
       ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
       LIMIT 4
     `;
@@ -108,11 +119,18 @@ const getCoordinatorSummary = async (req, res) => {
         NULL AS targetGroup,
         NULL AS location
       FROM project_stages ps
-      WHERE ps.deadline IS NOT NULL
-        AND ps.deadline >= CURDATE()
+      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : 'WHERE ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
+      ${!hasCoordinatorFilter ? '' : 'AND ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
       ORDER BY ps.deadline ASC, ps.stage_id ASC
       LIMIT 3
     `;
+
+    // Build parameter arrays for each query
+    const totalProjectsParams = coordinatorParams;
+    const pendingEvaluationsParams = coordinatorParams;
+    const completedProjectsParams = coordinatorParams;
+    const recentProjectsParams = coordinatorParams;
+    const upcomingDeadlinesParams = coordinatorParams;
 
     const [
       [totalProjectsRows],
@@ -122,12 +140,12 @@ const getCoordinatorSummary = async (req, res) => {
       [recentProjectsRows],
       [upcomingDeadlinesRows],
     ] = await Promise.all([
-      db.promise().query(totalProjectsQuery),
+      db.promise().query(totalProjectsQuery, totalProjectsParams),
       db.promise().query(activeStudentsQuery),
-      db.promise().query(pendingEvaluationsQuery),
-      db.promise().query(completedProjectsQuery),
-      db.promise().query(recentProjectsQuery),
-      db.promise().query(upcomingDeadlinesQuery),
+      db.promise().query(pendingEvaluationsQuery, pendingEvaluationsParams),
+      db.promise().query(completedProjectsQuery, completedProjectsParams),
+      db.promise().query(recentProjectsQuery, recentProjectsParams),
+      db.promise().query(upcomingDeadlinesQuery, upcomingDeadlinesParams),
     ]);
 
     const statsRow = {

@@ -1,11 +1,13 @@
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
+const path = require("path");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Validation Helper ---
 const VALID_ROLES = ['student', 'supervisor', 'coordinator', 'admin', 'mentor', 'industry mentor'];
@@ -156,9 +158,10 @@ const { uploadStageFile } = require("./src/controllers/projectController");
 app.post(
   "/api/projects/upload-file",
   (req, res, next) => {
+    console.log('📥 /api/projects/upload-file hit');
     upload.single("file")(req, res, (err) => {
       if (err) {
-        console.error("❌ Upload Middleware Error:", err.message);
+        console.error("❌ Upload Middleware Error:", err);
         return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
       }
       next();

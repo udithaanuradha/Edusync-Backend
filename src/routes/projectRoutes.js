@@ -23,7 +23,7 @@ router.get('/:id', getStageById);
 router.post('/create', createStage);
 
 // PUT /api/projects/update/:id -> update a stage (protected route)
-router.put('/update/:id', verifyToken, authorizeRole(['admin', 'instructor', 'faculty']), updateStage);
+router.put('/update/:id', verifyToken, authorizeRole(['admin', 'instructor', 'faculty', 'coordinator']), updateStage);
 
 // DELETE /api/projects/delete/:id -> delete a stage
 router.delete('/delete/:id', deleteStage);

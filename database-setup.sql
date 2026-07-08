@@ -17,9 +17,14 @@ CREATE TABLE users (
 -- 2. Create the Project Stages Table
 CREATE TABLE project_stages (
     stage_id INT AUTO_INCREMENT PRIMARY KEY,
+    level INT NOT NULL,
     stage_name VARCHAR(255) NOT NULL,
     description TEXT,
-    deadline DATE
+    deadline DATE,
+    created_by INT DEFAULT NULL,
+    resource_link TEXT DEFAULT NULL,
+    resource_links TEXT DEFAULT NULL,
+    mentor_details_url TEXT DEFAULT NULL
 );
 
 -- 3. Create the Group Requests Table
@@ -34,9 +39,11 @@ CREATE TABLE group_requests (
     rejection_reason TEXT NULL,
     is_final_submitted BOOLEAN DEFAULT FALSE,
     project_level INT NOT NULL,
+    created_by INT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_gr_student FOREIGN KEY (student_id) REFERENCES users(id),
-    CONSTRAINT fk_gr_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id)
+    CONSTRAINT fk_gr_supervisor FOREIGN KEY (supervisor_id) REFERENCES users(id),
+    CONSTRAINT fk_gr_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- 4. Create the Project Groups Table (UPDATED & MERGED)
@@ -52,14 +59,15 @@ CREATE TABLE project_groups (
 );
 
 -- 5. Create the Group Members Table (NEW)
-CREATE TABLE group_members (
+CREATE TABLE project_group_members (
     id INT AUTO_INCREMENT PRIMARY KEY,
     group_id INT NOT NULL,
     student_id INT NOT NULL,
     is_leader BOOLEAN DEFAULT FALSE,
-    CONSTRAINT fk_gm_group FOREIGN KEY (group_id) REFERENCES project_groups(id) ON DELETE CASCADE,
-    CONSTRAINT fk_gm_student FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE KEY unique_student (student_id)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_pgm_group FOREIGN KEY (group_id) REFERENCES project_groups(id) ON DELETE CASCADE,
+    CONSTRAINT fk_pgm_student FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_group_student (group_id, student_id)
 );
 
 -- 6. Create the Messages Table (For Communication Feature)
