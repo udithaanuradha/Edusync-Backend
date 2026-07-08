@@ -5,7 +5,7 @@
  */
 
 // Strict whitelist of valid user roles
-const VALID_ROLES = ['student', 'supervisor', 'coordinator', 'admin', 'industry mentor'];
+const VALID_ROLES = ['student', 'supervisor', 'coordinator', 'admin', 'industry mentor','lecturer'];
 
 /**
  * Validates if a role string is in the allowed roles list

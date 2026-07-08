@@ -191,8 +191,7 @@ app.get("/api/admin/stats", (req, res) => {
     `SELECT 
       (SELECT COUNT(*) FROM users) as totalUsers,
       (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
-      (SELECT COUNT(*) FROM users WHERE role = 'coordinator') as totalCoordinators,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor') as totalSupervisors,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
       (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
