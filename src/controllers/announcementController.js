@@ -1,15 +1,12 @@
 const db = require('../config/db');
 
-/**
- * Utility: Helpers for data normalization
- */
+let ensureAnnouncementsTablePromise = null;
+
 const normalizeAudience = (value) => String(value || '').trim().toLowerCase();
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
+    if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return '';
 };
@@ -218,9 +215,4 @@ const deleteAnnouncement = (req, res) => {
   });
 };
 
-module.exports = {
-  createAnnouncement,
-  getAnnouncements,
-  updateAnnouncement,
-  deleteAnnouncement
-};
+module.exports = { createAnnouncement, getAnnouncements, updateAnnouncement, deleteAnnouncement };

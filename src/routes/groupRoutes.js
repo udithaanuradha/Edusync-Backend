@@ -9,6 +9,11 @@ const router = express.Router();
   updateGroup,
   deleteGroup,
   getCoordinatorGroups,
+  getGroupMembers,
+  getSupervisors,
+  createGroupRequest,
+  finalSubmitRequest,
+  getStudentRequestStatus,
 } = require('../controllers/groupController');
 
 // Routes for project groups. Base path: /api/groups
