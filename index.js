@@ -260,6 +260,9 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+const submissionRoutes = require("./src/routes/submissionRoutes");
+app.use("/api/submissions", submissionRoutes);
+
 // Milestones & Tasks (Combined from HEAD)
 const milestoneRoutes = require("./src/routes/milestoneRoutes");
 app.use("/api/milestones", milestoneRoutes);
