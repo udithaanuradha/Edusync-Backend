@@ -34,7 +34,7 @@ app.post("/api/login", (req, res) => {
     return res.status(400).json({ error: "Email and password required" });
 
   db.query(
-    "SELECT id, name, email, role, level FROM users WHERE email = ? AND password = ?",
+    "SELECT id, name, email, role, designation, level FROM users WHERE email = ? AND password = ?",
     [email, password],
     (err, results) => {
       if (err) return res.status(500).json({ error: "Internal server error" });
@@ -46,6 +46,10 @@ app.post("/api/login", (req, res) => {
       // Normalize 'industry mentor' → 'mentor' before sending to frontend
       if (user.role === 'industry mentor') {
         user.role = 'mentor';
+      }
+
+      if (!user.designation) {
+        user.designation = null;
       }
 
       db.query(
@@ -61,31 +65,40 @@ app.post("/api/login", (req, res) => {
 });
 
 app.post('/api/signup', async (req, res) => {
-    let { name, email, password, role, university_id, phone, academic_unit } = req.body;
+  // Expect frontend to send firstName and lastName individually
+  let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
 
-    // If the role comes from the frontend as 'industry mentor', 
-    // keep it exactly as 'industry mentor' for your database insert statement
-    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-    const levelValue = role === 'student' ? 1 : null;
+  // Basic backend-side validation using central validator
+  const validationResult = validateUserCreation({ firstName, lastName, email, password, role, universityId: university_id });
+  if (!validationResult.valid) {
+    return res.status(400).json({ error: 'Validation failed', details: validationResult.errors });
+  }
 
-    db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
+  const name = `${firstName.trim()} ${lastName.trim()}`.trim();
 
-        const newUserId = result.insertId; 
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
-        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
+  // Level applies to students only; lecturers are supervisors by default.
+  const levelValue = role === 'student' ? 1 : null;
+  const designationValue = role === 'lecturer' ? 'supervisor' : null;
+  const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-        // Insert into your otp_verifications table using the newly generated user ID integer
-        const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
-        db.query(otpSql, [newUserId, otpCode, expiresAt], (otpErr, otpResult) => {
-            if (otpErr) return res.status(500).json({ error: otpErr.message });
+  db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
 
-            // Dispatch the email via Brevo using the user's email address string
-            sendOtpEmail(email, otpCode);
+    const newUserId = result.insertId; 
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
 
-            res.status(200).json({ success: true, message: "User registered. OTP sent!" });
-        });
+    // Insert into your otp_verifications table using the newly generated user ID integer
+    const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
+    db.query(otpSql, [newUserId, otpCode, expiresAt], (otpErr, otpResult) => {
+      if (otpErr) return res.status(500).json({ error: otpErr.message });
+
+      // Dispatch the email via Brevo using the user's email address string
+      sendOtpEmail(email, otpCode);
+
+      res.status(200).json({ success: true, message: "User registered. OTP sent!" });
     });
+  });
 });
 
 app.post('/api/verify-otp', (req, res) => {

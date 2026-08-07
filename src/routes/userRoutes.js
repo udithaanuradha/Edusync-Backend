@@ -5,16 +5,22 @@ const {
   searchStudentForGroup,
   searchSupervisors,
   getStudentsByLevel,
+  getLecturersForAssignment, 
+  assignCoordinator,         
+  removeCoordinator,         
 } = require("../controllers/userController");
 
-// This creates the URL: /api/users/
 router.get("/", getUsersByRole);
 
-// This creates the URL: /api/users/search
 router.get("/search", searchStudentForGroup);
 router.get("/supervisors", searchSupervisors);
 
-// This creates the URL: /api/users/level/:level
 router.get("/level/:level", getStudentsByLevel);
+
+router.get("/lecturers", getLecturersForAssignment);
+
+router.post("/assign-coordinator", assignCoordinator);
+
+router.post("/remove-coordinator", removeCoordinator);
 
 module.exports = router;
