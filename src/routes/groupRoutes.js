@@ -12,6 +12,8 @@ const router = express.Router();
   getGroupMembers,
   getSupervisors,
   createGroupRequest,
+  approveGroupRequest,
+  rejectGroupRequest,
   finalSubmitRequest,
   getStudentRequestStatus,
 } = require('../controllers/groupController');
@@ -28,6 +30,9 @@ router.get('/my-status/:studentId', getStudentGroup);
 // Get group details for a specific student at a specific level
 router.get('/student-group/:studentId/:level', getStudentGroup);
 
+// Get members for a specific group (used by Project Management page)
+router.get('/:groupId/members', getGroupMembers);
+
 // Admin/management: list groups by level
 router.get('/level/:level', getGroupsByLevel);
 
@@ -36,6 +41,19 @@ router.get('/coordinator/approved', getCoordinatorApprovedRequests);
 
 // Get groups created by a specific coordinator
 router.get('/coordinator/:coordinatorId/:level', getCoordinatorGroups);
+
+// Create a new group request (student submits to supervisor)
+router.post('/request', createGroupRequest);
+
+// Supervisor actions: approve or reject a request
+router.put('/request/:requestId/approve', approveGroupRequest);
+router.put('/request/:requestId/reject', rejectGroupRequest);
+
+// Finalize request and submit to coordinator (student action after supervisor approval)
+router.put('/final-submit', finalSubmitRequest);
+
+// Get requests where the student is leader or member
+router.get('/my-requests/:studentId', getStudentRequestStatus);
 
 // Create a new project group
 router.post('/create', createGroup);

@@ -2,9 +2,8 @@
  * Controller: Project stages and stage-file uploads
  * Contains handlers used by `src/routes/projectRoutes.js` and the upload endpoint
  */
-const fs = require('fs');
-const path = require('path');
 const Project = require('../models/projectModel');
+const { uploadBufferToCloudinary } = require('../config/cloudinaryConfig');
 
 /**
  * GET /api/projects/level/:level
@@ -102,7 +101,7 @@ const updateStage = (req, res) => {
  * Upload a file for a stage using the Cloudinary-backed middleware.
  * The file is saved to Cloudinary by middleware, then metadata is written to DB.
  */
-const uploadStageFile = (req, res) => {
+const uploadStageFile = async (req, res) => {
     console.log('\n📤 Upload request received');
     console.log(`   req.file: ${req.file ? '✅ Present' : '❌ Missing'}`);
     console.log(`   req.body:`, req.body);
@@ -110,9 +109,6 @@ const uploadStageFile = (req, res) => {
         console.log('   req.file details:', {
             originalname: req.file.originalname,
             size: req.file.size,
-            path: req.file.path,
-            secure_url: req.file.secure_url,
-            url: req.file.url,
             filename: req.file.filename,
         });
     }
@@ -129,57 +125,49 @@ const uploadStageFile = (req, res) => {
         return res.status(400).json({ success: false, error: 'stage_id is required' });
     }
 
-    const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
-    const uploadDir = path.join(process.cwd(), 'uploads');
-    if (!fs.existsSync(uploadDir)) {
-        fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const fileName = `${Date.now()}-${safeName}`;
-    const filePath = path.join(uploadDir, fileName);
-
     if (!req.file.buffer) {
         console.error('❌ No file buffer returned by multer.', req.file);
         return res.status(500).json({ success: false, error: 'Upload failed before file buffer was available' });
     }
 
+    const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
+
     try {
-        fs.writeFileSync(filePath, req.file.buffer);
-    } catch (writeErr) {
-        console.error('❌ Failed to write uploaded file to disk:', writeErr);
-        return res.status(500).json({ success: false, error: writeErr.message });
-    }
+        const cloudFolder = process.env.CLOUDINARY_STAGE_FOLDER || 'student-submissions';
+        const cloudResult = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname, cloudFolder);
+        const fileUrl = cloudResult.secure_url || cloudResult.url || (cloudResult.public_id ? cloudinary.url(cloudResult.public_id, { resource_type: 'auto' }) : null);
 
-    const fileUrl = `/uploads/${fileName}`;
+        console.log(`✅ File received: ${req.file.originalname}`);
+        console.log(`🔗 Cloudinary response:`, cloudResult);
+        console.log(`🔗 Cloudinary file URL: ${fileUrl}`);
 
-    console.log(`✅ File received: ${req.file.originalname}`);
-    console.log(`📍 File details:`, {
-        originalname: req.file.originalname,
-        size: req.file.size,
-        filename: fileName,
-        filePath
-    });
-    console.log(`🔗 Local file URL: ${fileUrl}`);
-
-    // Persist metadata via the model layer
-    Project.uploadStageFile({ 
-        stage_id, 
-        file_name: req.file.originalname, 
-        file_url: fileUrl, 
-        uploaded_by: uploaderId 
-    }, (err, result) => {
-        if (err) {
-            console.error('❌ Database Error:', err.message);
-            return res.status(500).json({ success: false, error: err.message });
+        if (!fileUrl) {
+            throw new Error('Cloudinary upload succeeded but no URL was returned');
         }
-        console.log(`✅ File metadata saved to DB! File ID: ${result.insertId}`);
-        res.status(201).json({ 
-            success: true, 
-            message: 'File uploaded to Cloudinary successfully!', 
+
+        // Persist metadata via the model layer
+        Project.uploadStageFile({ 
+            stage_id, 
+            file_name: req.file.originalname, 
             file_url: fileUrl, 
-            file_id: result.insertId 
+            uploaded_by: uploaderId 
+        }, (err, result) => {
+            if (err) {
+                console.error('❌ Database Error:', err.message);
+                return res.status(500).json({ success: false, error: err.message });
+            }
+            console.log(`✅ File metadata saved to DB! File ID: ${result.insertId}`);
+            res.status(201).json({ 
+                success: true, 
+                message: 'File uploaded to Cloudinary successfully!', 
+                file_url: fileUrl, 
+                file_id: result.insertId 
+            });
         });
-    });
+    } catch (uploadErr) {
+        console.error('❌ Cloudinary upload failed:', uploadErr);
+        return res.status(500).json({ success: false, error: uploadErr.message });
+    }
 };
 
 module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage, uploadStageFile };

@@ -513,11 +513,31 @@ const getSupervisors = async (req, res) => {
 const createGroupRequest = async (req, res) => {
   const { group_name, members_list, request_message, student_id, supervisor_id, project_level } = req.body;
   try {
-    const sql = `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level) 
-                 VALUES (?, ?, ?, ?, ?, ?)`;
+    // Validate student exists and level matches the requested project_level
+    const [userRows] = await dbPromise.query('SELECT id, level FROM users WHERE id = ?', [student_id]);
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+    const studentLevel = Number(userRows[0].level || 0);
+    if (Number(project_level) !== studentLevel) {
+      return res.status(403).json({ error: 'You can only create group requests for your own level' });
+    }
+
+    // Prevent students who are already group members from creating another request
+    const [existingMembership] = await dbPromise.query(
+      'SELECT 1 FROM project_group_members WHERE student_id = ? LIMIT 1',
+      [student_id]
+    );
+    if (existingMembership.length > 0) {
+      return res.status(400).json({ error: 'You are already a member of a group' });
+    }
+
+    const sql = `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level, status, created_at) 
+                 VALUES (?, ?, ?, ?, ?, ?, 'pending', NOW())`;
     const [result] = await dbPromise.query(sql, [group_name, members_list, request_message, student_id, supervisor_id, project_level]);
-    res.status(201).json({ message: "Request Sent", groupId: result.insertId });
+    res.status(201).json({ message: 'Request Sent', groupId: result.insertId });
   } catch (err) {
+    console.error('❌ Error in createGroupRequest:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -593,6 +613,113 @@ const getStudentRequestStatus = async (req, res) => {
   }
 };
 
+
+// Supervisor approves a request: create the actual group and members
+const approveGroupRequest = async (req, res) => {
+  const requestId = req.params.requestId;
+  const userId = req.headers['x-user-id'];
+  const userRole = req.headers['x-user-role'];
+
+  try {
+    const [rows] = await dbPromise.query('SELECT * FROM group_requests WHERE request_id = ?', [requestId]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+    const request = rows[0];
+
+    // Only the assigned supervisor (or admin) may approve
+    if (userRole !== 'supervisor' && userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only supervisor or admin can approve requests' });
+    }
+    if (userRole === 'supervisor' && String(userId) !== String(request.supervisor_id)) {
+      return res.status(403).json({ error: 'You are not the assigned supervisor for this request' });
+    }
+
+    // Prevent approving if already processed
+    if (request.status === 'approved') return res.status(400).json({ error: 'Request already approved' });
+    if (request.status === 'rejected') return res.status(400).json({ error: 'Request already rejected' });
+
+    // Parse members list to find student university ids and resolve to user ids
+    const indexes = extractMemberIndexes(request.members_list || '');
+    const normalizedLevel = Number(request.project_level || 0);
+    let resolvedMembers = [];
+    if (indexes.length > 0 && normalizedLevel > 0) {
+      const [memberRows] = await dbPromise.query(
+        `SELECT id, name, university_id FROM users WHERE role = 'student' AND level = ? AND university_id IN (?)`,
+        [normalizedLevel, indexes]
+      );
+      resolvedMembers = memberRows.map(r => r.id);
+    }
+
+    // Ensure leader is included (leader is the student who submitted the request)
+    const leaderId = request.student_id;
+    if (!resolvedMembers.includes(leaderId)) resolvedMembers.unshift(leaderId);
+
+    if (resolvedMembers.length === 0) {
+      return res.status(400).json({ error: 'No valid student members found to form the group' });
+    }
+
+    // Create group and members within a transaction
+    const conn = await dbPromise.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [groupInsert] = await conn.query(
+        `INSERT INTO project_groups (group_name, level, supervisor_id, created_by, created_at) VALUES (?, ?, ?, ?, NOW())`,
+        [request.group_name, normalizedLevel, request.supervisor_id || null, request.student_id]
+      );
+      const groupId = groupInsert.insertId;
+
+      const memberRows = resolvedMembers.map(id => [groupId, id, id === leaderId ? 1 : 0]);
+      await conn.query(
+        `INSERT INTO project_group_members (group_id, student_id, is_leader) VALUES ?`,
+        [memberRows]
+      );
+
+      await conn.query(`UPDATE group_requests SET status = 'approved', processed_at = NOW() WHERE request_id = ?`, [requestId]);
+      await conn.commit();
+      return res.json({ success: true, message: 'Request approved and group created', groupId });
+    } catch (err) {
+      await conn.rollback();
+      console.error('❌ Error creating group during approval:', err);
+      return res.status(500).json({ error: 'Failed to create group' });
+    } finally {
+      conn.release();
+    }
+  } catch (err) {
+    console.error('❌ approveGroupRequest error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+
+// Supervisor rejects a request with a reason
+const rejectGroupRequest = async (req, res) => {
+  const requestId = req.params.requestId;
+  const { reason } = req.body;
+  const userId = req.headers['x-user-id'];
+  const userRole = req.headers['x-user-role'];
+
+  try {
+    const [rows] = await dbPromise.query('SELECT * FROM group_requests WHERE request_id = ?', [requestId]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+    const request = rows[0];
+
+    if (userRole !== 'supervisor' && userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only supervisor or admin can reject requests' });
+    }
+    if (userRole === 'supervisor' && String(userId) !== String(request.supervisor_id)) {
+      return res.status(403).json({ error: 'You are not the assigned supervisor for this request' });
+    }
+
+    if (request.status === 'approved') return res.status(400).json({ error: 'Request already approved' });
+    if (request.status === 'rejected') return res.status(400).json({ error: 'Request already rejected' });
+
+    await dbPromise.query(`UPDATE group_requests SET status = 'rejected', rejection_reason = ?, processed_at = NOW() WHERE request_id = ?`, [reason || null, requestId]);
+    return res.json({ success: true, message: 'Request rejected' });
+  } catch (err) {
+    console.error('❌ rejectGroupRequest error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
 module.exports = {
   getGroupsByLevel,
   getStudentGroup,
@@ -601,4 +728,11 @@ module.exports = {
   updateGroup,
   deleteGroup,
   getCoordinatorGroups,
+  getGroupMembers,
+  getSupervisors,
+  createGroupRequest,
+  finalSubmitRequest,
+  approveGroupRequest,
+  rejectGroupRequest,
+  getStudentRequestStatus,
 };
