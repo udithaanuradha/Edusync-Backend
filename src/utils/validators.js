@@ -7,6 +7,27 @@
 // Strict whitelist of valid user roles
 const VALID_ROLES = ['student', 'supervisor', 'coordinator', 'admin', 'industry mentor','lecturer'];
 
+// Strict whitelist of valid student departments (this is the same 3-option
+// "Degree Program" already collected at signup and stored in the
+// `academic_unit` column — group-formation department scoping reuses it
+// rather than adding a second, separate field). Note: `academic_unit` is
+// also used to store a lecturer's own department (IT/IDS/CM), which is a
+// completely different value domain — this whitelist must only ever be
+// applied when role === 'student'.
+const VALID_DEPARTMENTS = ['AI', 'IT', 'ITM'];
+
+/**
+ * Validates a student department/degree-program code against the whitelist.
+ * @param {string} department - The department code to validate
+ * @returns {boolean} - True if department is valid, false otherwise
+ */
+function validateDepartment(department) {
+  if (!department || typeof department !== 'string') {
+    return false;
+  }
+  return VALID_DEPARTMENTS.includes(department.toUpperCase().trim());
+}
+
 /**
  * Validates if a role string is in the allowed roles list
  * @param {string} role - The role to validate
@@ -140,6 +161,15 @@ function validateUserCreation(userData) {
     }
   }
 
+  // Validate department for students (STRICT - must be in whitelist)
+  if (userData.role && validateRole(userData.role) && userData.role.toLowerCase() === 'student') {
+    if (!userData.department) {
+      errors.push('Department is required for students');
+    } else if (!validateDepartment(userData.department)) {
+      errors.push(`Invalid department. Allowed departments are: ${VALID_DEPARTMENTS.join(', ')}`);
+    }
+  }
+
   return {
     valid: errors.length === 0,
     errors: errors
@@ -211,11 +241,13 @@ function validateUserUpdate(userData) {
  */
 module.exports = {
   VALID_ROLES,
+  VALID_DEPARTMENTS,
   validateRole,
   validateEmail,
   validatePassword,
   validateName,
   validateUniversityId,
+  validateDepartment,
   validateUserCreation,
   validateUserUpdate
 };

@@ -16,6 +16,9 @@ const router = express.Router();
   rejectGroupRequest,
   finalSubmitRequest,
   getStudentRequestStatus,
+  getPendingRequestsForSupervisor,
+  approveRequestBySupervisor,
+  rejectRequestBySupervisor,
 } = require('../controllers/groupController');
 
 // Routes for project groups. Base path: /api/groups
@@ -29,6 +32,12 @@ router.get('/my-status/:studentId', getStudentGroup);
 
 // Get group details for a specific student at a specific level
 router.get('/student-group/:studentId/:level', getStudentGroup);
+
+// List every user who can act as a supervisor for a group request
+// (was imported into this file but never actually mounted — GroupRequest.tsx
+// has been calling this exact path all along, so it 404'd and the
+// "Loading supervisors..." UI never resolved)
+router.get('/supervisors', getSupervisors);
 
 // Get members for a specific group (used by Project Management page)
 router.get('/:groupId/members', getGroupMembers);
@@ -45,9 +54,18 @@ router.get('/coordinator/:coordinatorId/:level', getCoordinatorGroups);
 // Create a new group request (student submits to supervisor)
 router.post('/request', createGroupRequest);
 
-// Supervisor actions: approve or reject a request
+// Supervisor actions: approve or reject a request (legacy, param-based,
+// single-supervisor — kept for backward compatibility, not called by the
+// current frontend, which uses the body-based routes below instead)
 router.put('/request/:requestId/approve', approveGroupRequest);
 router.put('/request/:requestId/reject', rejectGroupRequest);
+
+// Supervisor actions on a multi-supervisor request: body = { request_id, supervisor_id/approved_by|rejected_by, rejection_reason/reason/reject_reason }
+router.put('/approve', approveRequestBySupervisor);
+router.put('/reject', rejectRequestBySupervisor);
+
+// Pending requests targeted at a specific supervisor
+router.get('/pending/:supervisorId', getPendingRequestsForSupervisor);
 
 // Finalize request and submit to coordinator (student action after supervisor approval)
 router.put('/final-submit', finalSubmitRequest);
