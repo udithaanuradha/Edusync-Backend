@@ -69,7 +69,10 @@ app.post('/api/signup', async (req, res) => {
   let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
 
   // Basic backend-side validation using central validator
-  const validationResult = validateUserCreation({ firstName, lastName, email, password, role, universityId: university_id });
+  // Note: `department` here is validated only for role === 'student' (see
+  // validators.js) — academic_unit doubles as a lecturer's own department
+  // (a different value domain), which this validation deliberately ignores.
+  const validationResult = validateUserCreation({ firstName, lastName, email, password, role, universityId: university_id, department: academic_unit });
   if (!validationResult.valid) {
     return res.status(400).json({ error: 'Validation failed', details: validationResult.errors });
   }
@@ -272,6 +275,9 @@ app.use("/api/messages", messageRoutes);
 
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+const submissionRoutes = require("./src/routes/submissionRoutes");
+app.use("/api/submissions", submissionRoutes);
 
 // Milestones & Tasks (Combined from HEAD)
 const milestoneRoutes = require("./src/routes/milestoneRoutes");

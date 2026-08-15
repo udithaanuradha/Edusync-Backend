@@ -1,4 +1,5 @@
-const db = require("../config/db"); 
+const db = require("../config/db");
+const dbPromise = db.promise();
 
 // Existing Route: Search Student
 const searchStudentForGroup = (req, res) => {
@@ -69,19 +70,50 @@ const getUsersByRole = (req, res) => {
 };
 
 // Existing Route: Get Students by Level
-const getStudentsByLevel = (req, res) => {
+// Group-formation update: when `studentId` is provided (the requesting
+// student), results are scoped to that student's own department (resolved
+// server-side from their own row — a `department` query param, if sent, is
+// deliberately ignored so a client can't spoof another department) in
+// addition to level. Without `studentId` this keeps its original behavior
+// (all students at the level, any department) so existing callers that rely
+// on the unfiltered list — e.g. the coordinator's manual group builder in
+// GroupManagement.tsx — are unaffected.
+const getStudentsByLevel = async (req, res) => {
   const level = req.params.level;
+  const studentId = req.query.studentId;
   if (!level) return res.status(400).json({ error: "Please provide an Academic Level." });
 
-  const sql = `SELECT id, name, university_id FROM users WHERE role = 'student' AND level = ? ORDER BY name ASC`;
+  try {
+    if (studentId) {
+      const [requesterRows] = await dbPromise.query(
+        `SELECT academic_unit FROM users WHERE id = ? AND role = 'student'`,
+        [studentId]
+      );
+      if (requesterRows.length === 0) {
+        return res.status(404).json({ error: "Requesting student not found." });
+      }
+      const department = requesterRows[0].academic_unit;
 
-  db.query(sql, [level], (err, results) => {
-    if (err) {
-      console.error("Error fetching students by level:", err);
-      return res.status(500).json({ error: "Failed to fetch students." });
+      const [results] = await dbPromise.query(
+        `SELECT id, name, university_id, academic_unit AS department, level
+         FROM users
+         WHERE role = 'student' AND level = ? AND id != ?
+           AND academic_unit ${department === null ? 'IS NULL' : '= ?'}
+         ORDER BY name ASC`,
+        department === null ? [level, studentId] : [level, studentId, department]
+      );
+      return res.status(200).json(results);
     }
+
+    const [results] = await dbPromise.query(
+      `SELECT id, name, university_id, academic_unit AS department, level FROM users WHERE role = 'student' AND level = ? ORDER BY name ASC`,
+      [level]
+    );
     res.status(200).json(results);
-  });
+  } catch (err) {
+    console.error("Error fetching students by level:", err);
+    res.status(500).json({ error: "Failed to fetch students." });
+  }
 };
 
 const getLecturersForAssignment = (req, res) => {
@@ -177,6 +209,53 @@ const removeCoordinator = (req, res) => {
   });
 };
 
+/**
+ * GET: Returns a single user's profile (no password) for any group member
+ * to view about any other member of a group they both belong to.
+ * Requires `?requesterId=` — the viewer's own id. Access is allowed when:
+ *   - requesterId === the target id (viewing your own profile), or
+ *   - requesterId and the target share at least one project_group_members.group_id row.
+ */
+const getUserProfile = async (req, res) => {
+  const targetId = req.params.id;
+  const requesterId = req.query.requesterId;
+
+  if (!requesterId) {
+    return res.status(400).json({ success: false, error: 'requesterId is required.' });
+  }
+
+  try {
+    if (String(requesterId) !== String(targetId)) {
+      const [shared] = await dbPromise.query(
+        `SELECT 1
+         FROM project_group_members gm1
+         JOIN project_group_members gm2 ON gm1.group_id = gm2.group_id
+         WHERE gm1.student_id = ? AND gm2.student_id = ?
+         LIMIT 1`,
+        [requesterId, targetId]
+      );
+      if (shared.length === 0) {
+        return res.status(403).json({ success: false, error: 'Access denied. You do not share a group with this user.' });
+      }
+    }
+
+    const [rows] = await dbPromise.query(
+      `SELECT id, name, email, university_id, academic_unit AS department, level, role, phone
+       FROM users WHERE id = ?`,
+      [targetId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+
+    res.status(200).json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error('Error fetching user profile:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch profile.' });
+  }
+};
+
 module.exports = {
   searchStudentForGroup,
   searchSupervisors,
@@ -184,6 +263,7 @@ module.exports = {
   getStudentsByLevel,
   getLecturersForAssignment,
   assignCoordinator,
-  removeCoordinator
+  removeCoordinator,
+  getUserProfile,
 };
 
