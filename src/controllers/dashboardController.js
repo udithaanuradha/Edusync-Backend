@@ -5,6 +5,16 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const projectGroupsHasCreatedBy = async () => {
+  try {
+    const [rows] = await db.promise().query("SHOW COLUMNS FROM project_groups LIKE 'created_by'");
+    return rows.length > 0;
+  } catch (error) {
+    console.warn('project_groups.created_by check failed in dashboard controller:', error.message);
+    return false;
+  }
+};
+
 const getCoordinatorSummary = async (req, res) => {
   try {
     // Extract coordinatorId from query parameters
@@ -12,12 +22,16 @@ const getCoordinatorSummary = async (req, res) => {
     
     // Build WHERE clause for filtering by coordinator (if coordinatorId is provided)
     const hasCoordinatorFilter = !!coordinatorId;
-    const coordinatorParams = coordinatorId ? [coordinatorId] : [];
+    const supportsCoordinatorTracking = hasCoordinatorFilter ? await projectGroupsHasCreatedBy() : false;
+    const coordinatorParams = coordinatorId && supportsCoordinatorTracking ? [coordinatorId] : [];
+
+    const projectGroupCoordinatorFilter = supportsCoordinatorTracking && hasCoordinatorFilter ? 'WHERE created_by = ?' : '';
+    const projectGroupCoordinatorJoinFilter = supportsCoordinatorTracking && hasCoordinatorFilter ? 'AND pg.created_by = ?' : '';
 
     const totalProjectsQuery = `
       SELECT COUNT(*) AS totalProjects
       FROM project_groups
-      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
+      ${projectGroupCoordinatorFilter}
     `;
 
     const activeStudentsQuery = `
@@ -44,7 +58,7 @@ const getCoordinatorSummary = async (req, res) => {
         FROM evaluation_panels ep
         LEFT JOIN project_groups pg ON pg.group_name = ep.target_group
         WHERE ep.panel_date >= CURDATE()
-          ${hasCoordinatorFilter ? 'AND pg.created_by = ?' : ''}
+          ${projectGroupCoordinatorJoinFilter}
       )
       SELECT COUNT(DISTINCT panel_id) AS pendingEvaluations
       FROM panel_groups pg_info
@@ -69,7 +83,7 @@ const getCoordinatorSummary = async (req, res) => {
           WHERE mark_type = 'stage'
           GROUP BY group_id
         ) mark_summary ON mark_summary.group_id = pg.id
-        ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
+        ${projectGroupCoordinatorFilter}
       ) completed_groups
       WHERE completed_groups.totalStages > 0
         AND completed_groups.marked_stages >= completed_groups.totalStages
@@ -104,7 +118,7 @@ const getCoordinatorSummary = async (req, res) => {
         WHERE mark_type = 'stage'
         GROUP BY group_id
       ) progress ON progress.group_id = pg.id
-      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : ''}
+      ${projectGroupCoordinatorFilter}
       ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
       LIMIT 4
     `;
@@ -119,8 +133,7 @@ const getCoordinatorSummary = async (req, res) => {
         NULL AS targetGroup,
         NULL AS location
       FROM project_stages ps
-      ${hasCoordinatorFilter ? 'WHERE created_by = ?' : 'WHERE ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
-      ${!hasCoordinatorFilter ? '' : 'AND ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
+      ${supportsCoordinatorTracking && hasCoordinatorFilter ? 'WHERE created_by = ? AND ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()' : 'WHERE ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
       ORDER BY ps.deadline ASC, ps.stage_id ASC
       LIMIT 3
     `;
