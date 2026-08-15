@@ -34,7 +34,7 @@ app.post("/api/login", (req, res) => {
     return res.status(400).json({ error: "Email and password required" });
 
   db.query(
-    "SELECT id, name, email, role, designation, level FROM users WHERE email = ? AND password = ?",
+    "SELECT id, name, email, role, designation, level, is_verified FROM users WHERE email = ? AND password = ?",
     [email, password],
     (err, results) => {
       if (err) return res.status(500).json({ error: "Internal server error" });
@@ -42,6 +42,11 @@ app.post("/api/login", (req, res) => {
         return res.status(401).json({ error: "Invalid credentials" });
 
       const user = results[0];
+
+      if (!user.is_verified) {
+        return res.status(403).json({ error: "Please verify your email before logging in" });
+      }
+      delete user.is_verified;
 
       // Normalize 'industry mentor' → 'mentor' before sending to frontend
       if (user.role === 'industry mentor') {
@@ -134,8 +139,15 @@ app.post('/api/verify-otp', (req, res) => {
 
             if (otpResults.length > 0) {
                 // SUCCESS! The code matches and is not expired.
-                // You can update a user verification flag or simply return success so frontend redirects them to login.
-                res.status(200).json({ success: true, message: "Account successfully verified! You can now log in." });
+                // Record the verification, then clear out the used OTP row(s).
+                db.query("UPDATE users SET is_verified = TRUE WHERE id = ?", [userId], (updateErr) => {
+                    if (updateErr) return res.status(500).json({ error: "Failed to update verification status." });
+
+                    db.query("DELETE FROM otp_verifications WHERE user_id = ?", [userId], (deleteErr) => {
+                        if (deleteErr) console.error("❌ Failed to delete used OTP row(s):", deleteErr);
+                        res.status(200).json({ success: true, message: "Account successfully verified! You can now log in." });
+                    });
+                });
             } else {
                 res.status(400).json({ error: "Invalid or expired OTP code." });
             }
