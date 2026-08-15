@@ -303,6 +303,36 @@ const getCoordinatorApprovedRequests = async (req, res) => {
         resolvedMembers = memberRows;
       }
 
+      // Fallback: if no members matched by university ID, try matching by name
+      if (resolvedMembers.length === 0 && normalizedLevel > 0) {
+        const names = extractMemberNames(row.members_list);
+        if (names.length > 0) {
+          const [memberRowsByName] = await dbPromise.query(
+            `SELECT id, name, university_id, email, level FROM users
+             WHERE role = 'student' AND level = ? AND name IN (?)`,
+            [normalizedLevel, names]
+          );
+          resolvedMembers = memberRowsByName;
+        }
+      }
+
+      // Always ensure the leader (row.student_id) is present via a direct FK lookup
+      if (normalizedLevel > 0 && Number(row.student_id) > 0) {
+        const [requesterRows] = await dbPromise.query(
+          `SELECT id, name, university_id, email, level FROM users
+           WHERE id = ? AND role = 'student' AND level = ?
+           LIMIT 1`,
+          [row.student_id, normalizedLevel]
+        );
+
+        if (requesterRows.length > 0) {
+          const requester = requesterRows[0];
+          if (!resolvedMembers.some((member) => member.id === requester.id)) {
+            resolvedMembers = [requester, ...resolvedMembers];
+          }
+        }
+      }
+
       return {
         request_id: row.request_id,
         project_name: extractProjectName(row.request_message),
