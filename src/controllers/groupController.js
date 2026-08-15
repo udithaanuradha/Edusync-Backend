@@ -83,7 +83,7 @@ const getGroupsByLevel = async (req, res) => {
     await ensureGroupMembersTable();
 
     // 1. Get the Groups - filter by coordinator if provided
-    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor,pg.mentor_id AS mentorId
                      FROM project_groups pg
                      LEFT JOIN users u ON u.id = pg.supervisor_id
                      WHERE pg.level = ?`;
@@ -137,6 +137,7 @@ const getGroupsByLevel = async (req, res) => {
         groupId: group.groupId,
         groupName: group.groupName,
         supervisor: group.supervisor || 'Not Assigned',
+        mentorId: group.mentorId,
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         members: groupMembers,
         status: 'Active'

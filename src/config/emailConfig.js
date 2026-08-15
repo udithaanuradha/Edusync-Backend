@@ -1,7 +1,7 @@
 /**
  * src/config/emailConfig.js
  * Purpose: Initializes a stable SMTP transport using nodemailer to send 
- * out system-generated 6-digit verification codes via Brevo's SMTP relay.
+ * out system-generated transactional emails via Brevo's SMTP relay.
  */
 
 // 1. Force environment variables to load first before any initialization logic
@@ -22,14 +22,10 @@ const transporter = nodemailer.createTransport({
 });
 
 /**
- * Sends a stylized Transactional OTP HTML email to a target recipient.
- * @param {string} toEmail - The email address of the registering student or mentor
- * @param {string} otpCode - The randomly generated 6-digit numeric string
- * @returns {Promise} - Resolves upon successful delivery acknowledgment
+ * TYPE 1: Sends a stylized Transactional OTP HTML email to a target recipient.
  */
 const sendOtpEmail = async (toEmail, otpCode) => {
     const mailOptions = {
-        // Use a clean display identity but route it through your valid sender configuration
         from: '"EduSync Support" <medinieedirisinghe@gmail.com>',
         to: toEmail,
         subject: "Verify Your EduSync Account",
@@ -50,4 +46,33 @@ const sendOtpEmail = async (toEmail, otpCode) => {
     return await transporter.sendMail(mailOptions);
 };
 
-module.exports = { sendOtpEmail };
+/**
+ * TYPE 2: Sends a Transactional Mentor Invitation HTML email.
+ */
+const sendMentorInviteEmail = async (toEmail, mentorName, groupName, setupUrl) => {
+    const mailOptions = {
+        from: '"EduSync Support" <medinieedirisinghe@gmail.com>',
+        to: toEmail,
+        subject: "Invitation: Join Edusync as an Industry Mentor",
+        html: `
+          <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px;">
+              <h3>Hello ${mentorName},</h3>
+              <p>You have been assigned as the Industry Mentor for <b>Group ${groupName}</b>.</p>
+              <p>To access your mentor dashboard and review project progress, please configure your account credentials by clicking the link below:</p>
+              <p><a href="${setupUrl}" style="background-color:#2563eb;color:#ffffff;padding:10px 20px;text-decoration:none;border-radius:5px;display:inline-block;font-weight:bold;">Set Up My Account</a></p>
+              <br/>
+              <p>Thank you,<br/>Academic Project Coordinator Team</p>
+            </body>
+          </html>
+        `
+    };
+
+    return await transporter.sendMail(mailOptions);
+};
+
+// Export BOTH functions so different parts of the backend can use them
+module.exports = { 
+    sendOtpEmail, 
+    sendMentorInviteEmail 
+};
