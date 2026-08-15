@@ -29,7 +29,7 @@ const transporter = nodemailer.createTransport({
  */
 const sendOtpEmail = async (toEmail, otpCode) => {
     const mailOptions = {
-        // Use a clean display identity but route it through your valid sender configuration
+        // Use the project Gmail sender address for consistent delivery from the configured account.
         from: '"EduSync Support" <medinieedirisinghe@gmail.com>',
         to: toEmail,
         subject: "Verify Your EduSync Account",

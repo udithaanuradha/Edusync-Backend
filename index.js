@@ -84,7 +84,7 @@ app.post('/api/signup', async (req, res) => {
   const designationValue = role === 'lecturer' ? 'supervisor' : null;
   const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-  db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue], (err, result) => {
+  db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue], async (err, result) => {
     if (err) return res.status(500).json({ error: err.message });
 
     const newUserId = result.insertId; 
@@ -93,13 +93,18 @@ app.post('/api/signup', async (req, res) => {
 
     // Insert into your otp_verifications table using the newly generated user ID integer
     const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
-    db.query(otpSql, [newUserId, otpCode, expiresAt], (otpErr, otpResult) => {
+    db.query(otpSql, [newUserId, otpCode, expiresAt], async (otpErr, otpResult) => {
       if (otpErr) return res.status(500).json({ error: otpErr.message });
 
-      // Dispatch the email via Brevo using the user's email address string
-      sendOtpEmail(email, otpCode);
-
-      res.status(200).json({ success: true, message: "User registered. OTP sent!" });
+      try {
+        console.log(`📧 Sending OTP to ${email}`);
+        await sendOtpEmail(email, otpCode);
+        console.log(`✅ OTP email sent to ${email}`);
+        return res.status(200).json({ success: true, message: "User registered. OTP sent!" });
+      } catch (mailErr) {
+        console.error('❌ Failed to send OTP email:', mailErr);
+        return res.status(500).json({ error: 'User created but OTP email could not be sent.', details: mailErr.message });
+      }
     });
   });
 });
@@ -140,7 +145,7 @@ app.post('/api/verify-otp', (req, res) => {
 
 // --- Resend OTP Route ---
 // Generates a fresh OTP for an already-registered user and resends it via email
-app.post('/api/resend-otp', async (req, res) => {
+app.post('/api/resend-otp', (req, res) => {
     const { email } = req.body;
 
     if (!email) return res.status(400).json({ error: 'Email is required.' });
@@ -164,13 +169,19 @@ app.post('/api/resend-otp', async (req, res) => {
 
             // 4. Insert the new OTP into the verifications table
             const insertOtpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
-            db.query(insertOtpSql, [userId, newOtp, expiresAt], (insertErr) => {
+            db.query(insertOtpSql, [userId, newOtp, expiresAt], async (insertErr) => {
                 if (insertErr) return res.status(500).json({ error: 'Failed to generate new verification code.' });
 
                 // 5. Send the new OTP to the user's email via Brevo
-                sendOtpEmail(email, newOtp);
-
-                res.status(200).json({ success: true, message: 'A new verification code has been sent to your email.' });
+                try {
+                    console.log(`📧 Resending OTP to ${email}`);
+                    await sendOtpEmail(email, newOtp);
+                    console.log(`✅ OTP resent to ${email}`);
+                    return res.status(200).json({ success: true, message: 'A new verification code has been sent to your email.' });
+                } catch (mailErr) {
+                    console.error('❌ Failed to resend OTP email:', mailErr);
+                    return res.status(500).json({ error: 'OTP was generated but could not be delivered to your email.', details: mailErr.message });
+                }
             });
         });
     });

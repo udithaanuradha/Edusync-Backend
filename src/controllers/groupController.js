@@ -2,7 +2,23 @@ const db = require('../config/db');
 const dbPromise = db.promise();
 
 let ensureMembersTablePromise = null;
+let projectGroupsHasCreatedByCache = null;
 
+const projectGroupsHasCreatedBy = async () => {
+  if (projectGroupsHasCreatedByCache !== null) {
+    return projectGroupsHasCreatedByCache;
+  }
+
+  try {
+    const [rows] = await dbPromise.query("SHOW COLUMNS FROM project_groups LIKE 'created_by'");
+    projectGroupsHasCreatedByCache = rows.length > 0;
+  } catch (error) {
+    console.warn('project_groups.created_by check failed, assuming column is missing:', error.message);
+    projectGroupsHasCreatedByCache = false;
+  }
+
+  return projectGroupsHasCreatedByCache;
+};
 
 /**
  * Ensures the 'project_group_members' table exists in the database.
@@ -81,6 +97,7 @@ const getGroupsByLevel = async (req, res) => {
   
   try {
     await ensureGroupMembersTable();
+    const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
 
     // 1. Get the Groups - filter by coordinator if provided
     let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, u.name AS supervisor
@@ -89,7 +106,7 @@ const getGroupsByLevel = async (req, res) => {
                      WHERE pg.level = ?`;
     let params = [level];
     
-    if (coordinatorId) {
+    if (coordinatorId && supportsCoordinatorTracking) {
       groupQuery += ` AND pg.created_by = ?`;
       params.push(coordinatorId);
     }
@@ -320,6 +337,7 @@ const createGroup = async (req, res) => {
   let connection;
   try {
     await ensureGroupMembersTable();
+    const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
     connection = await dbPromise.getConnection();
     await connection.beginTransaction();
 
@@ -331,10 +349,21 @@ const createGroup = async (req, res) => {
       resolvedDepartment = leaderRows[0]?.academic_unit || null;
     }
 
-    const [groupInsert] = await connection.query(
-      `INSERT INTO project_groups (group_name, level, supervisor_id, created_by, department) VALUES (?, ?, ?, ?, ?)`,
-      [groupName, level, supervisorId || null, coordinatorId, resolvedDepartment]
-    );
+    let insertQuery = `INSERT INTO project_groups (group_name, level, supervisor_id, department`;
+    const insertValues = [groupName, level, supervisorId || null, resolvedDepartment];
+
+    if (supportsCoordinatorTracking) {
+      insertQuery += ', created_by';
+      insertValues.push(coordinatorId);
+    }
+
+    insertQuery += ') VALUES (?, ?, ?, ?';
+    if (supportsCoordinatorTracking) {
+      insertQuery += ', ?';
+    }
+    insertQuery += ')';
+
+    const [groupInsert] = await connection.query(insertQuery, insertValues);
 
     const groupId = groupInsert.insertId;
     const memberRows = memberIds.map((id) => [groupId, id, id === leaderId ? 1 : 0]);
@@ -404,16 +433,23 @@ const getCoordinatorGroups = async (req, res) => {
   
   try {
     await ensureGroupMembersTable();
+    const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
 
     // 1. Get the Groups created by this coordinator at this level
-    const [groups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, u.name AS supervisor
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, u.name AS supervisor
        FROM project_groups pg
        LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.created_by = ? AND pg.level = ?
-       ORDER BY pg.id DESC`,
-      [coordinatorId, level]
-    );
+       WHERE pg.level = ?`;
+    const groupParams = [level];
+
+    if (supportsCoordinatorTracking && coordinatorId) {
+      groupQuery += ` AND pg.created_by = ?`;
+      groupParams.push(coordinatorId);
+    }
+
+    groupQuery += ` ORDER BY pg.id DESC`;
+
+    const [groups] = await dbPromise.query(groupQuery, groupParams);
 
     console.log(`📊 Found ${groups.length} groups created by coordinator ${coordinatorId} for Level ${level}.`);
 
