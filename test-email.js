@@ -5,7 +5,7 @@
 require('dotenv').config();
 const { sendOtpEmail } = require('./src/config/emailConfig');
 
-// Replace this with your own personal email address to see the test message
+//  own personal email address to see the test message
 const testRecipient = "medinieedirisinghe@gmail.com"; 
 const mockOtp = "999888";
 

@@ -100,7 +100,7 @@ const getGroupsByLevel = async (req, res) => {
     const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
 
     // 1. Get the Groups - filter by coordinator if provided
-    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, u.name AS supervisor
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor,pg.mentor_id AS mentorId
                      FROM project_groups pg
                      LEFT JOIN users u ON u.id = pg.supervisor_id
                      WHERE pg.level = ?`;
@@ -155,6 +155,7 @@ const getGroupsByLevel = async (req, res) => {
         groupName: group.groupName,
         department: group.department,
         supervisor: group.supervisor || 'Not Assigned',
+        mentorId: group.mentorId,
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         members: groupMembers,
         status: 'Active'
