@@ -1,7 +1,7 @@
 const db = require("../config/db");
 const dbPromise = db.promise();
 
-// Existing Route: Search Student
+// Search Student
 const searchStudentForGroup = (req, res) => {
   const { uniId, level } = req.query;
 
@@ -27,7 +27,7 @@ const searchStudentForGroup = (req, res) => {
   });
 };
 
-// Existing Route: Search Supervisors
+// Search Supervisors
 const searchSupervisors = (req, res) => {
   const rawSearch = typeof req.query.search === "string" ? req.query.search : "";
   const search = rawSearch.trim();
@@ -49,7 +49,7 @@ const searchSupervisors = (req, res) => {
   });
 };
 
-// Existing Route: Get Users by Role
+// Get Users by Role
 const getUsersByRole = (req, res) => {
   const role = req.query.role;
   const validRoles = ["student", "supervisor", "coordinator", "admin", "mentor"];
@@ -69,15 +69,7 @@ const getUsersByRole = (req, res) => {
   });
 };
 
-// Existing Route: Get Students by Level
-// Group-formation update: when `studentId` is provided (the requesting
-// student), results are scoped to that student's own department (resolved
-// server-side from their own row — a `department` query param, if sent, is
-// deliberately ignored so a client can't spoof another department) in
-// addition to level. Without `studentId` this keeps its original behavior
-// (all students at the level, any department) so existing callers that rely
-// on the unfiltered list — e.g. the coordinator's manual group builder in
-// GroupManagement.tsx — are unaffected.
+// Get Students by Level
 const getStudentsByLevel = async (req, res) => {
   const level = req.params.level;
   const studentId = req.query.studentId;
@@ -116,11 +108,12 @@ const getStudentsByLevel = async (req, res) => {
   }
 };
 
+// Fetch Lecturers for Assignment
 const getLecturersForAssignment = (req, res) => {
   const sql = `
-    SELECT id, name, university_id, designation, academic_unit, level 
+    SELECT id, name, university_id, designation, academic_unit, level, role 
     FROM users 
-    WHERE role = 'lecturer'
+    WHERE role = 'lecturer' OR role = 'supervisor' OR role = 'coordinator' OR designation = 'coordinator'
     ORDER BY name ASC
   `;
   db.query(sql, [], (err, results) => {
@@ -132,90 +125,79 @@ const getLecturersForAssignment = (req, res) => {
   });
 };
 
-const assignCoordinator = (req, res) => {
-  const { user_id, level } = req.body; 
+// Generic Assign Coordinator
+const assignCoordinator = async (req, res) => {
+  const { user_id, lecturerId, level, degreeProgram } = req.body; 
+  const targetUserId = user_id || lecturerId;
 
-  if (!user_id || !level) {
-    return res.status(400).json({ error: "Missing required fields." });
+  if (!targetUserId || !level || !degreeProgram) {
+    return res.status(400).json({ error: "Missing required fields: user_id, level, or degreeProgram." });
   }
 
-  
-  const resetSql = `
-    UPDATE users 
-    SET designation = 'supervisor', level = NULL 
-    WHERE level = ? AND designation = 'coordinator'
-  `;
+  try {
+    let mappedUnit = degreeProgram;
+    if (degreeProgram === 'ITM') mappedUnit = 'IDS';
+    if (degreeProgram === 'AI') mappedUnit = 'CM';
 
-  db.query(resetSql, [level], (err, resetResults) => {
-    if (err) {
-      console.error("Error resetting old coordinator:", err);
-      return res.status(500).json({ error: "Failed to update current coordinator status." });
-    }
+    // 1. Reset ONLY the current coordinator matching SPECIFIC level AND degree program
+    const resetSql = `
+      UPDATE users 
+      SET designation = 'supervisor', role = 'lecturer', level = NULL 
+      WHERE level = ? 
+        AND (academic_unit = ? OR academic_unit = ?) 
+        AND (designation = 'coordinator' OR role = 'coordinator')
+    `;
+    await dbPromise.query(resetSql, [level, degreeProgram, mappedUnit]);
 
-   
+    // 2. Assign the new Coordinator
     const assignSql = `
       UPDATE users 
-      SET designation = 'coordinator', level = ? 
-      WHERE id = ? AND role = 'lecturer'
+      SET designation = 'coordinator', role = 'coordinator', level = ?, academic_unit = COALESCE(academic_unit, ?) 
+      WHERE id = ?
     `;
+    await dbPromise.query(assignSql, [level, mappedUnit, targetUserId]);
 
-    db.query(assignSql, [level, user_id], (err, assignResults) => {
-      if (err) {
-        console.error("Error assigning new coordinator:", err);
-        return res.status(500).json({ error: "Failed to assign coordinator." });
-      }
-
-      
-      // Give 'supervisor' designation to all lecturers
-      // who don't have any designation assigned yet.
-      // Only touches lecturers — other roles are
-      // protected by WHERE role = 'lecturer'
-      const updateSupervisorsSql = `
-       UPDATE users 
-       SET designation = 'supervisor' 
-       WHERE role = 'lecturer' 
-       AND (designation IS NULL OR designation = '')
-      `;
-
-      db.query(updateSupervisorsSql, [], (err, supervisorResults) => {
-        if (err) console.error("Error updating other lecturers to supervisors:", err);
-        
-        res.status(200).json({ 
-          success: true, 
-          message: "Successfully assigned Coordinator and synchronized remaining lecturers as supervisors." 
-        });
-      });
+    return res.status(200).json({ 
+      success: true, 
+      message: "Successfully assigned Coordinator." 
     });
-  });
+  } catch (err) {
+    console.error("Error assigning coordinator:", err);
+    return res.status(500).json({ error: "Failed to assign coordinator." });
+  }
 };
 
-const removeCoordinator = (req, res) => {
-  const { level } = req.body;
+// Generic Remove Coordinator
+const removeCoordinator = async (req, res) => {
+  const { level, degreeProgram } = req.body;
 
-  if (!level) return res.status(400).json({ error: "Missing required level." });
+  if (!level || !degreeProgram) {
+    return res.status(400).json({ error: "Missing required fields: level or degreeProgram." });
+  }
 
-  const sql = `
-    UPDATE users 
-    SET designation = 'supervisor', level = NULL 
-    WHERE level = ? AND designation = 'coordinator'
-  `;
+  try {
+    let mappedUnit = degreeProgram;
+    if (degreeProgram === 'ITM') mappedUnit = 'IDS';
+    if (degreeProgram === 'AI') mappedUnit = 'CM';
 
-  db.query(sql, [level], (err, results) => {
-    if (err) {
-      console.error("Error removing coordinator:", err);
-      return res.status(500).json({ error: "Failed to remove coordinator." });
-    }
-    res.status(200).json({ success: true, message: "Coordinator status reset to supervisor." });
-  });
+    // Reset ONLY the coordinator matching SPECIFIC level AND degree program
+    const sql = `
+      UPDATE users 
+      SET designation = 'supervisor', role = 'lecturer', level = NULL 
+      WHERE level = ? 
+        AND (academic_unit = ? OR academic_unit = ?) 
+        AND (designation = 'coordinator' OR role = 'coordinator')
+    `;
+    await dbPromise.query(sql, [level, degreeProgram, mappedUnit]);
+
+    return res.status(200).json({ success: true, message: "Coordinator removed successfully." });
+  } catch (err) {
+    console.error("Error removing coordinator:", err);
+    return res.status(500).json({ error: "Failed to remove coordinator." });
+  }
 };
 
-/**
- * GET: Returns a single user's profile (no password) for any group member
- * to view about any other member of a group they both belong to.
- * Requires `?requesterId=` — the viewer's own id. Access is allowed when:
- *   - requesterId === the target id (viewing your own profile), or
- *   - requesterId and the target share at least one project_group_members.group_id row.
- */
+// User Profile
 const getUserProfile = async (req, res) => {
   const targetId = req.params.id;
   const requesterId = req.query.requesterId;
@@ -266,4 +248,3 @@ module.exports = {
   removeCoordinator,
   getUserProfile,
 };
-
