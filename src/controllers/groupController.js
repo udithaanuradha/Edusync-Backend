@@ -3,6 +3,48 @@ const dbPromise = db.promise();
 
 let ensureMembersTablePromise = null;
 let projectGroupsHasCreatedByCache = null;
+let ensureRequestLifecycleColumnsPromise = null;
+
+const ensureRequestLifecycleColumns = async () => {
+  if (!ensureRequestLifecycleColumnsPromise) {
+    ensureRequestLifecycleColumnsPromise = (async () => {
+      try {
+        const [columns] = await dbPromise.query('SHOW COLUMNS FROM group_requests');
+        const columnNames = new Set((columns || []).map((column) => column.Field));
+
+        if (!columnNames.has('is_group_created')) {
+          await dbPromise.query(`ALTER TABLE group_requests ADD COLUMN is_group_created BOOLEAN NOT NULL DEFAULT FALSE`);
+        }
+
+        if (!columnNames.has('created_group_id')) {
+          await dbPromise.query(`ALTER TABLE group_requests ADD COLUMN created_group_id INT NULL`);
+        }
+
+        const [fkCheck] = await dbPromise.query(
+          `SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'group_requests' AND COLUMN_NAME = 'created_group_id' LIMIT 1`
+        );
+
+        if (fkCheck.length === 0) {
+          try {
+            await dbPromise.query(
+              `ALTER TABLE group_requests ADD CONSTRAINT fk_gr_created_group
+               FOREIGN KEY (created_group_id) REFERENCES project_groups(id) ON DELETE SET NULL`
+            );
+          } catch (constraintError) {
+            if (!String(constraintError.message).includes('Duplicate key') && !String(constraintError.message).includes('already exists')) {
+              throw constraintError;
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('group_requests lifecycle tracking check failed:', error.message);
+      }
+    })();
+  }
+
+  await ensureRequestLifecycleColumnsPromise;
+};
 
 const projectGroupsHasCreatedBy = async () => {
   if (projectGroupsHasCreatedByCache !== null) {
@@ -270,8 +312,13 @@ const getCoordinatorApprovedRequests = async (req, res) => {
   const finalOnly = String(req.query.finalOnly || '0') === '1' ? 1 : 0;
 
   try {
+    await ensureRequestLifecycleColumns();
+
     // Build the WHERE clause dynamically
     let whereCondition = `gr.status = 'approved'
+         AND (COALESCE(gr.is_group_created, 0) = 0 OR gr.created_group_id IS NULL OR NOT EXISTS (
+           SELECT 1 FROM project_groups pg WHERE pg.id = gr.created_group_id
+         ))
          AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
          AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)`;
     let params = [finalOnly, level, level];
@@ -342,7 +389,10 @@ const getCoordinatorApprovedRequests = async (req, res) => {
         supervisor_id: row.supervisor_id,
         department: row.department,
         resolved_members: resolvedMembers,
-        created_at: row.created_at
+        created_at: row.created_at,
+        is_group_created: !!row.is_group_created,
+        created_group_id: row.created_group_id || null,
+        group_status: row.is_group_created ? 'already_created' : 'pending_creation'
       };
     }));
 
@@ -351,6 +401,43 @@ const getCoordinatorApprovedRequests = async (req, res) => {
     console.error(error);
     return res.status(500).json({ success: false, error: 'Failed to load requests.' });
   }
+};
+
+const resolveGroupRequestForCreatedGroup = async (connection, { leaderId, level, groupName }) => {
+  const safeGroupName = String(groupName || '').trim();
+  const [matches] = await connection.query(
+    `SELECT request_id, group_name
+     FROM group_requests
+     WHERE student_id = ?
+       AND project_level = ?
+       AND status = 'approved'
+       AND COALESCE(is_group_created, 0) = 0
+     ORDER BY created_at DESC, request_id DESC
+     LIMIT 20`,
+    [leaderId, level]
+  );
+
+  if (!matches.length) {
+    return null;
+  }
+
+  if (safeGroupName) {
+    const exact = matches.find((row) => String(row.group_name || '').trim().toLowerCase() === safeGroupName.toLowerCase());
+    if (exact) {
+      return exact.request_id;
+    }
+
+    const fuzzy = matches.find((row) => {
+      const existingName = String(row.group_name || '').trim().toLowerCase();
+      return existingName.includes(safeGroupName.toLowerCase()) || safeGroupName.toLowerCase().includes(existingName);
+    });
+
+    if (fuzzy) {
+      return fuzzy.request_id;
+    }
+  }
+
+  return matches[0].request_id;
 };
 
 const createGroup = async (req, res) => {
@@ -368,6 +455,7 @@ const createGroup = async (req, res) => {
   let connection;
   try {
     await ensureGroupMembersTable();
+    await ensureRequestLifecycleColumns();
     const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
     connection = await dbPromise.getConnection();
     await connection.beginTransaction();
@@ -403,6 +491,18 @@ const createGroup = async (req, res) => {
       `INSERT INTO project_group_members (group_id, student_id, is_leader) VALUES ?`,
       [memberRows]
     );
+
+    const matchedRequestId = await resolveGroupRequestForCreatedGroup(connection, { leaderId, level, groupName });
+    if (matchedRequestId) {
+      await connection.query(
+        `UPDATE group_requests
+         SET is_group_created = TRUE,
+             created_group_id = ?,
+             processed_at = NOW()
+         WHERE request_id = ?`,
+        [groupId, matchedRequestId]
+      );
+    }
 
     await connection.commit();
     res.status(201).json({ success: true, data: { groupId } });
@@ -443,13 +543,56 @@ const updateGroup = async (req, res) => {
 
 //delete group details and members 
 const deleteGroup = async (req, res) => {
-  const groupId = req.params.id;
+  const groupId = Number(req.params.id);
+
+  if (!groupId) {
+    return res.status(400).json({ success: false, error: 'Group id is required.' });
+  }
+
+  const connection = await dbPromise.getConnection();
+
   try {
-    await dbPromise.query(`DELETE FROM project_group_members WHERE group_id = ?`, [groupId]);
-    await dbPromise.query(`DELETE FROM project_groups WHERE id = ?`, [groupId]);
-    res.json({ success: true, message: 'Deleted.' });
+    await ensureRequestLifecycleColumns();
+    await connection.beginTransaction();
+
+    const [groupRows] = await connection.query(
+      `SELECT group_name, level FROM project_groups WHERE id = ? LIMIT 1`,
+      [groupId]
+    );
+
+    const groupRow = groupRows[0];
+
+    if (!groupRow) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, error: 'Group not found.' });
+    }
+
+    await connection.query(
+      `UPDATE group_requests
+       SET is_group_created = FALSE,
+           created_group_id = NULL,
+           processed_at = NOW()
+       WHERE created_group_id = ?
+          OR (group_name = ? AND project_level = ?)
+          OR (student_id IN (SELECT student_id FROM project_group_members WHERE group_id = ?))`,
+      [groupId, groupRow.group_name, groupRow.level, groupId]
+    );
+
+    await connection.query(`DELETE FROM project_group_members WHERE group_id = ?`, [groupId]);
+    await connection.query(`DELETE FROM project_groups WHERE id = ?`, [groupId]);
+
+    await connection.commit();
+    return res.json({ success: true, message: 'Deleted.' });
   } catch (error) {
-    res.status(500).json({ success: false, error: 'Delete failed.' });
+    if (connection) {
+      await connection.rollback();
+    }
+    console.error('❌ deleteGroup error:', error);
+    return res.status(500).json({ success: false, error: 'Delete failed.' });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
   }
 };
 
@@ -665,9 +808,15 @@ const createGroupRequest = async (req, res) => {
       }
     }
 
-    // Prevent students who are already group members from creating another request
+    // Prevent students who are already active group members from creating another request.
+    // A deleted group should not leave a stale membership behind.
     const [existingMembership] = await dbPromise.query(
-      'SELECT 1 FROM project_group_members WHERE student_id = ? LIMIT 1',
+      `SELECT 1
+       FROM project_group_members pm
+       JOIN project_groups pg ON pg.id = pm.group_id
+       WHERE pm.student_id = ?
+         AND pg.id IS NOT NULL
+       LIMIT 1`,
       [student_id]
     );
     if (existingMembership.length > 0) {
@@ -676,7 +825,10 @@ const createGroupRequest = async (req, res) => {
 
     // Look for an existing request from this student at this level
     const [existingRequests] = await dbPromise.query(
-      `SELECT request_id, status FROM group_requests WHERE student_id = ? AND project_level = ? ORDER BY created_at DESC LIMIT 1`,
+      `SELECT request_id, status, is_group_created, created_group_id
+       FROM group_requests
+       WHERE student_id = ? AND project_level = ?
+       ORDER BY created_at DESC LIMIT 1`,
       [student_id, project_level]
     );
 
@@ -685,19 +837,36 @@ const createGroupRequest = async (req, res) => {
       await conn.beginTransaction();
       let requestId;
 
-      if (existingRequests.length > 0 && existingRequests[0].status !== 'rejected') {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ error: `You already have a ${existingRequests[0].status} request for this level.` });
-      }
-
       if (existingRequests.length > 0) {
-        // Reuse the rejected row: reset it and replace its supervisor targets.
-        requestId = existingRequests[0].request_id;
+        const previous = existingRequests[0];
+        let hasLiveCreatedGroup = false;
+
+        if (previous.created_group_id) {
+          const [liveGroupRows] = await conn.query(
+            `SELECT 1 FROM project_groups WHERE id = ? LIMIT 1`,
+            [previous.created_group_id]
+          );
+          hasLiveCreatedGroup = liveGroupRows.length > 0;
+        }
+
+        const staleRequestState = previous.status !== 'rejected' && (
+          Number(previous.is_group_created || 0) === 0 ||
+          !hasLiveCreatedGroup
+        );
+
+        if (!staleRequestState) {
+          await conn.rollback();
+          conn.release();
+          return res.status(400).json({ error: `You already have a ${previous.status} request for this level.` });
+        }
+
+        // Reuse the stale request row after a deleted group or an old created flag.
+        requestId = previous.request_id;
         await conn.query(
           `UPDATE group_requests
            SET group_name = ?, members_list = ?, request_message = ?, status = 'pending',
-               rejection_reason = NULL, supervisor_id = NULL, is_final_submitted = FALSE
+               rejection_reason = NULL, supervisor_id = NULL, is_final_submitted = FALSE,
+               is_group_created = FALSE, created_group_id = NULL, processed_at = NOW()
            WHERE request_id = ?`,
           [group_name, members_list, request_message, requestId]
         );
@@ -786,6 +955,8 @@ const getStudentRequestStatus = async (req, res) => {
       : `WHERE student_id = ?`;
     const whereParams = universityId ? [studentId, universityId] : [studentId];
 
+    await ensureRequestLifecycleColumns();
+
     const [results] = await dbPromise.query(
       `SELECT * FROM (
          SELECT gr.*, ROW_NUMBER() OVER (PARTITION BY gr.project_level ORDER BY gr.created_at DESC, gr.request_id DESC) AS rn
@@ -793,6 +964,9 @@ const getStudentRequestStatus = async (req, res) => {
          ${whereClause}
        ) ranked
        WHERE rn = 1
+         AND (COALESCE(is_group_created, 0) = 0 OR created_group_id IS NULL OR NOT EXISTS (
+           SELECT 1 FROM project_groups pg WHERE pg.id = ranked.created_group_id
+         ))
        ORDER BY created_at DESC`,
       whereParams
     );
@@ -883,7 +1057,15 @@ const approveGroupRequest = async (req, res) => {
         [memberRows]
       );
 
-      await conn.query(`UPDATE group_requests SET status = 'approved', processed_at = NOW() WHERE request_id = ?`, [requestId]);
+      await conn.query(
+        `UPDATE group_requests
+         SET status = 'approved',
+             is_group_created = TRUE,
+             created_group_id = ?,
+             processed_at = NOW()
+         WHERE request_id = ?`,
+        [groupId, requestId]
+      );
       await conn.commit();
       return res.json({ success: true, message: 'Request approved and group created', groupId });
     } catch (err) {
@@ -949,6 +1131,8 @@ const rejectGroupRequest = async (req, res) => {
 const getPendingRequestsForSupervisor = async (req, res) => {
   const supervisorId = req.params.supervisorId;
   try {
+    await ensureRequestLifecycleColumns();
+
     const [rows] = await dbPromise.query(
       `SELECT gr.request_id, gr.group_name, gr.members_list, gr.request_message,
               gr.project_level, gr.student_id, gr.created_at,
@@ -959,7 +1143,11 @@ const getPendingRequestsForSupervisor = async (req, res) => {
        JOIN group_requests gr ON gr.request_id = grs.request_id
        LEFT JOIN users student ON student.id = gr.student_id
        LEFT JOIN users supervisor ON supervisor.id = grs.supervisor_id
-       WHERE grs.supervisor_id = ? AND grs.status = 'pending'
+       WHERE grs.supervisor_id = ?
+         AND grs.status = 'pending'
+         AND (COALESCE(gr.is_group_created, 0) = 0 OR gr.created_group_id IS NULL OR NOT EXISTS (
+           SELECT 1 FROM project_groups pg WHERE pg.id = gr.created_group_id
+         ))
        ORDER BY gr.created_at DESC`,
       [supervisorId]
     );

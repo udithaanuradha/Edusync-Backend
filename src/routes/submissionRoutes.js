@@ -1,6 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { createSubmission, getStudentSubmissions, deleteSubmission } = require('../controllers/submissionController');
+const {
+  createSubmission,
+  getStudentSubmissions,
+  deleteSubmission,
+  getCoordinatorSubmissionsByLevel,
+} = require('../controllers/submissionController');
 const { upload } = require('../config/cloudinaryConfig');
 
 router.post(
@@ -16,6 +21,7 @@ router.post(
   createSubmission,
 );
 router.get('/student/:studentId', getStudentSubmissions);
+router.get('/level/:level', getCoordinatorSubmissionsByLevel);
 router.delete('/:submissionId', deleteSubmission);
 
 module.exports = router;

@@ -125,4 +125,59 @@ const deleteSubmission = (req, res) => {
   });
 };
 
-module.exports = { createSubmission, getStudentSubmissions, deleteSubmission };
+const getCoordinatorSubmissionsByLevel = async (req, res) => {
+  const level = Number(req.params.level ?? req.query.level ?? 0);
+
+  if (!level) {
+    return res.status(400).json({ success: false, message: 'A valid level is required.' });
+  }
+
+  const sql = `
+    SELECT
+      ss.submission_id,
+      ss.stage_id,
+      ss.student_id,
+      ss.file_paths,
+      ss.submitted_at,
+      ss.status,
+      ps.stage_name,
+      ps.deadline,
+      ps.level,
+      u.name AS student_name,
+      u.email AS student_email,
+      pg.group_name
+    FROM student_submissions ss
+    LEFT JOIN project_stages ps ON ps.stage_id = ss.stage_id
+    LEFT JOIN users u ON u.id = ss.student_id
+    LEFT JOIN project_group_members pgm ON pgm.student_id = ss.student_id
+    LEFT JOIN project_groups pg ON pg.id = pgm.group_id AND pg.level = ps.level
+    WHERE ps.level = ?
+    ORDER BY ss.submitted_at DESC
+  `;
+
+  db.query(sql, [level], (err, results) => {
+    if (err) {
+      console.error('Coordinator submissions fetch failed:', err.message);
+      return res.status(500).json({ success: false, message: 'Unable to fetch submissions for this level.', error: err.message });
+    }
+
+    const normalized = (results || []).map((row) => ({
+      ...row,
+      file_paths: typeof row.file_paths === 'string' ? JSON.parse(row.file_paths) : row.file_paths || [],
+      group_name: row.group_name || `${row.student_name || 'Student'} Submission`,
+      evaluator_name: 'Not assigned',
+      submitted_at: row.submitted_at,
+      status: row.status || 'submitted',
+      current_status: row.status || 'submitted',
+    }));
+
+    return res.json({ success: true, data: normalized });
+  });
+};
+
+module.exports = {
+  createSubmission,
+  getStudentSubmissions,
+  deleteSubmission,
+  getCoordinatorSubmissionsByLevel,
+};
