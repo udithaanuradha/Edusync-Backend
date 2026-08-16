@@ -28,6 +28,31 @@ db.getConnection((err, connection) => {
 });
 
 // --- 3. Authentication Routes ---
+const normalizeUserForClient = (user) => {
+  if (!user || typeof user !== 'object') {
+    return user;
+  }
+
+  const normalizedRole = user.role === 'industry mentor' ? 'mentor' : user.role;
+  const normalizedDesignation = typeof user.designation === 'string'
+    ? user.designation.trim().toLowerCase()
+    : null;
+
+  // Coordinator accounts are stored as lecturer + designation='coordinator'.
+  // Keep the real designation for routing decisions instead of dropping it.
+  const safeUser = { ...user, role: normalizedRole, designation: normalizedDesignation || null };
+
+  if (normalizedRole === 'lecturer' && normalizedDesignation === 'coordinator') {
+    safeUser.effectiveRole = 'coordinator';
+  } else if (normalizedRole === 'lecturer' && normalizedDesignation === 'supervisor') {
+    safeUser.effectiveRole = 'supervisor';
+  } else {
+    safeUser.effectiveRole = normalizedRole;
+  }
+
+  return safeUser;
+};
+
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
@@ -41,6 +66,7 @@ app.post("/api/login", (req, res) => {
       if (!results.length)
         return res.status(401).json({ error: "Invalid credentials" });
 
+<<<<<<< Updated upstream
       const user = results[0];
 
       if (!user.is_verified) {
@@ -56,13 +82,16 @@ app.post("/api/login", (req, res) => {
       if (!user.designation) {
         user.designation = null;
       }
+=======
+      const user = normalizeUserForClient(results[0]);
+>>>>>>> Stashed changes
 
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
         [user.id],
         (updateErr) => {
           if (updateErr) console.error("❌ Failed to update login timestamp");
-          res.status(200).json({ message: "Login successful", user: user });
+          res.status(200).json({ message: "Login successful", user });
         }
       );
     }
