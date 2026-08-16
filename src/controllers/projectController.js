@@ -1,12 +1,29 @@
+/**
+ * Controller: Project stages and stage-file uploads
+ * Contains handlers used by `src/routes/projectRoutes.js` and the upload endpoint
+ */
 const Project = require('../models/projectModel');
+const { uploadBufferToCloudinary } = require('../config/cloudinaryConfig');
 
+/**
+ * GET /api/projects/level/:level
+ * Returns all stages for the provided `level`.
+ * If ?coordinatorId=X is provided, filters to only stages created by that coordinator.
+ */
 const getStagesByLevel = (req, res) => {
-    Project.getStagesByLevel(req.params.level, (err, results) => {
+    const level = req.params.level;
+    const coordinatorId = req.query.coordinatorId; // Extract from query string
+    
+    Project.getStagesByLevel(level, coordinatorId, (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, data: results });
     });
 };
 
+/**
+ * GET /api/projects/:id
+ * Return a single stage by its id. Responds 404 if not found.
+ */
 const getStageById = (req, res) => {
     Project.getStageById(req.params.id, (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
@@ -15,26 +32,51 @@ const getStageById = (req, res) => {
     });
 };
 
+/**
+ * POST /api/projects/create
+ * Create a new project stage. Required fields: `level`, `stage_name`, `created_by`.
+ * Optional stage payload fields such as `description`, `deadline`, and `resource_links`
+ * are passed through to the model layer.
+ * `user_role` is required for authorization checks in the controller.
+ */
 const createStage = (req, res) => {
+    console.log('\n🔵 POST /api/projects/create received');
+    console.log('   Request body:', JSON.stringify(req.body, null, 2));
+    
     const { level, stage_name, created_by, user_role } = req.body;
     if (!level || !stage_name || !created_by) {
+        console.log('   ❌ Missing required fields');
         return res.status(400).json({
             success: false,
             message: 'level, stage_name, and created_by are required'
         });
     }
     if (!user_role) {
+        console.log('   ❌ Missing user_role');
         return res.status(400).json({
             success: false,
             message: 'user_role is required for authorization'
         });
     }
+
+    // Delegate DB insert to the model layer
     Project.createStage(req.body, (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (err) {
+            console.log('   ❌ Database error in createStage:');
+            console.error('   Error code:', err.code);
+            console.error('   Error message:', err.message);
+            console.error('   Full error:', err);
+            return res.status(500).json({ success: false, error: err.message, code: err.code });
+        }
+        console.log('   ✅ Stage created successfully with ID:', result.insertId);
         res.status(201).json({ success: true, message: 'Stage created!', id: result.insertId });
     });
 };
 
+/**
+ * DELETE /api/projects/delete/:id
+ * Remove a stage by id.
+ */
 const deleteStage = (req, res) => {
     Project.deleteStage(req.params.id, (err) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
@@ -42,6 +84,11 @@ const deleteStage = (req, res) => {
     });
 };
 
+/**
+ * PUT /api/projects/update/:id
+ * Update a stage's fields. Authorization can be applied at the route.
+ * Optional stage payload fields such as `resource_links` are passed through to the model layer.
+ */
 const updateStage = (req, res) => {
     Project.updateStage(req.params.id, req.body, (err) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
@@ -49,75 +96,78 @@ const updateStage = (req, res) => {
     });
 };
 
-const uploadStageFile = (req, res) => {
+/**
+ * POST /api/projects/upload-file
+ * Upload a file for a stage using the Cloudinary-backed middleware.
+ * The file is saved to Cloudinary by middleware, then metadata is written to DB.
+ */
+const uploadStageFile = async (req, res) => {
     console.log('\n📤 Upload request received');
     console.log(`   req.file: ${req.file ? '✅ Present' : '❌ Missing'}`);
     console.log(`   req.body:`, req.body);
+    if (req.file) {
+        console.log('   req.file details:', {
+            originalname: req.file.originalname,
+            size: req.file.size,
+            filename: req.file.filename,
+        });
+    }
     
-    // req.file is created by the upload.single('file') middleware (Cloudinary storage)
+    // `req.file` is created by the `upload.single('file')` multer middleware.
     if (!req.file) {
         console.error('❌ No file in request!');
         return res.status(400).json({ success: false, error: 'No file provided' });
     }
 
     const { stage_id, uploaded_by } = req.body;
-    
     if (!stage_id) {
         console.error('❌ No stage_id provided!');
         return res.status(400).json({ success: false, error: 'stage_id is required' });
     }
 
-    // Fetches project stages by level while restricting industry mentors from accessing Level 1 content.
-    const getStagesByLevel = (req, res) => {
-    const { level } = req.params;
-    const { user_role } = req.body; // Or get this from your auth token/middleware
-
-    // Specifically block Mentors from Level 1, but allow 2, 3, and 4
-    if (level == 1 && user_role === 'mentor') {
-        return res.status(403).json({ 
-            success: false, 
-            message: "Industry mentors are not assigned to Level 1 stages." 
-        });
+    if (!req.file.buffer) {
+        console.error('❌ No file buffer returned by multer.', req.file);
+        return res.status(500).json({ success: false, error: 'Upload failed before file buffer was available' });
     }
 
-    Project.getStagesByLevel(level, (err, results) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, data: results });
-    });
-};
-
-    // File info from Cloudinary
-    const fileName = req.file.originalname;
-    const fileUrl = req.file.path; // Cloudinary URL (e.g., https://res.cloudinary.com/...)
     const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
 
-    console.log(`✅ File received: ${fileName}`);
-    console.log(`📍 File details:`, {
-        originalname: req.file.originalname,
-        size: req.file.size,
-        path: req.file.path,
-        filename: req.file.filename
-    });
-    console.log(`🔗 Cloudinary URL: ${fileUrl}`);
+    try {
+        const cloudFolder = process.env.CLOUDINARY_STAGE_FOLDER || 'student-submissions';
+        const cloudResult = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname, cloudFolder);
+        const fileUrl = cloudResult.secure_url || cloudResult.url || (cloudResult.public_id ? cloudinary.url(cloudResult.public_id, { resource_type: 'auto' }) : null);
 
-    Project.uploadStageFile({ 
-        stage_id, 
-        file_name: fileName, 
-        file_url: fileUrl, 
-        uploaded_by: uploaderId 
-    }, (err, result) => {
-        if (err) {
-            console.error('❌ Database Error:', err.message);
-            return res.status(500).json({ success: false, error: err.message });
+        console.log(`✅ File received: ${req.file.originalname}`);
+        console.log(`🔗 Cloudinary response:`, cloudResult);
+        console.log(`🔗 Cloudinary file URL: ${fileUrl}`);
+
+        if (!fileUrl) {
+            throw new Error('Cloudinary upload succeeded but no URL was returned');
         }
-        console.log(`✅ File metadata saved to DB! File ID: ${result.insertId}`);
-        res.status(201).json({ 
-            success: true, 
-            message: 'File uploaded to Cloudinary successfully!', 
+
+        // Persist metadata via the model layer
+        Project.uploadStageFile({ 
+            stage_id, 
+            file_name: req.file.originalname, 
             file_url: fileUrl, 
-            file_id: result.insertId 
+            uploaded_by: uploaderId 
+        }, (err, result) => {
+            if (err) {
+                console.error('❌ Database Error:', err.message);
+                return res.status(500).json({ success: false, error: err.message });
+            }
+            console.log(`✅ File metadata saved to DB! File ID: ${result.insertId}`);
+            res.status(201).json({ 
+                success: true, 
+                message: 'File uploaded to Cloudinary successfully!', 
+                file_url: fileUrl, 
+                file_id: result.insertId 
+            });
         });
-    });
+    } catch (uploadErr) {
+        console.error('❌ Cloudinary upload failed:', uploadErr);
+        return res.status(500).json({ success: false, error: uploadErr.message });
+    }
 };
 
 module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage, uploadStageFile };

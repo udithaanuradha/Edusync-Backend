@@ -10,6 +10,10 @@ const runMigrations = async () => {
 
   const migrations = [
     {
+      name: 'Add resource_links column to project_stages',
+      sql: `ALTER TABLE project_stages ADD COLUMN IF NOT EXISTS resource_links TEXT DEFAULT NULL`,
+    },
+    {
       name: 'Add receiver_id column',
       sql: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS receiver_id INT NOT NULL DEFAULT 0`,
     },
