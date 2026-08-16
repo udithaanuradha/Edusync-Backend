@@ -1,7 +1,7 @@
 const db = require("../config/db");
 const dbPromise = db.promise();
 
-// Search Student
+// Search Student for Group
 const searchStudentForGroup = (req, res) => {
   const { uniId, level } = req.query;
 
@@ -27,7 +27,7 @@ const searchStudentForGroup = (req, res) => {
   });
 };
 
-// Search Supervisors
+// Search Supervisors (Searching Lecturers)
 const searchSupervisors = (req, res) => {
   const rawSearch = typeof req.query.search === "string" ? req.query.search : "";
   const search = rawSearch.trim();
@@ -35,7 +35,7 @@ const searchSupervisors = (req, res) => {
   const sql = `
     SELECT id, name, email, role
     FROM users
-    WHERE role = 'supervisor'
+    WHERE role = 'lecturer'
       AND (? = '' OR name LIKE CONCAT('%', ?, '%') OR email LIKE CONCAT('%', ?, '%'))
     ORDER BY name ASC LIMIT 20
   `;
@@ -52,7 +52,7 @@ const searchSupervisors = (req, res) => {
 // Get Users by Role
 const getUsersByRole = (req, res) => {
   const role = req.query.role;
-  const validRoles = ["student", "supervisor", "coordinator", "admin", "mentor"];
+  const validRoles = ["student", "admin", "mentor", "lecturer"];
   
   if (!role || !validRoles.includes(role)) {
     return res.status(400).json({ error: "Please provide a valid role." });
@@ -108,12 +108,12 @@ const getStudentsByLevel = async (req, res) => {
   }
 };
 
-// Fetch Lecturers for Assignment
+// Fetch Lecturers for Assignment (role = 'lecturer' only)
 const getLecturersForAssignment = (req, res) => {
   const sql = `
     SELECT id, name, university_id, designation, academic_unit, level, role 
     FROM users 
-    WHERE role = 'lecturer' OR role = 'supervisor' OR role = 'coordinator' OR designation = 'coordinator'
+    WHERE role = 'lecturer'
     ORDER BY name ASC
   `;
   db.query(sql, [], (err, results) => {
@@ -125,7 +125,7 @@ const getLecturersForAssignment = (req, res) => {
   });
 };
 
-// Generic Assign Coordinator
+// Assign Coordinator
 const assignCoordinator = async (req, res) => {
   const { user_id, lecturerId, level, degreeProgram } = req.body; 
   const targetUserId = user_id || lecturerId;
@@ -139,27 +139,27 @@ const assignCoordinator = async (req, res) => {
     if (degreeProgram === 'ITM') mappedUnit = 'IDS';
     if (degreeProgram === 'AI') mappedUnit = 'CM';
 
-    // 1. Reset ONLY the current coordinator matching SPECIFIC level AND degree program
+    // 1. Reset ONLY the current coordinator's designation and level
     const resetSql = `
       UPDATE users 
-      SET designation = 'supervisor', role = 'lecturer', level = NULL 
+      SET designation = 'supervisor', level = NULL 
       WHERE level = ? 
         AND (academic_unit = ? OR academic_unit = ?) 
-        AND (designation = 'coordinator' OR role = 'coordinator')
+        AND designation = 'coordinator'
     `;
     await dbPromise.query(resetSql, [level, degreeProgram, mappedUnit]);
 
-    // 2. Assign the new Coordinator
+    // 2. Assign designation = 'coordinator' and update academic_unit to Department (IDS/CM/IT)
     const assignSql = `
       UPDATE users 
-      SET designation = 'coordinator', role = 'coordinator', level = ?, academic_unit = COALESCE(academic_unit, ?) 
-      WHERE id = ?
+      SET designation = 'coordinator', level = ?, academic_unit = ? 
+      WHERE id = ? AND role = 'lecturer'
     `;
     await dbPromise.query(assignSql, [level, mappedUnit, targetUserId]);
 
     return res.status(200).json({ 
       success: true, 
-      message: "Successfully assigned Coordinator." 
+      message: "Successfully assigned Coordinator designation." 
     });
   } catch (err) {
     console.error("Error assigning coordinator:", err);
@@ -167,7 +167,7 @@ const assignCoordinator = async (req, res) => {
   }
 };
 
-// Generic Remove Coordinator
+// Remove Coordinator
 const removeCoordinator = async (req, res) => {
   const { level, degreeProgram } = req.body;
 
@@ -180,17 +180,16 @@ const removeCoordinator = async (req, res) => {
     if (degreeProgram === 'ITM') mappedUnit = 'IDS';
     if (degreeProgram === 'AI') mappedUnit = 'CM';
 
-    // Reset ONLY the coordinator matching SPECIFIC level AND degree program
     const sql = `
       UPDATE users 
-      SET designation = 'supervisor', role = 'lecturer', level = NULL 
+      SET designation = 'supervisor', level = NULL 
       WHERE level = ? 
         AND (academic_unit = ? OR academic_unit = ?) 
-        AND (designation = 'coordinator' OR role = 'coordinator')
+        AND designation = 'coordinator'
     `;
     await dbPromise.query(sql, [level, degreeProgram, mappedUnit]);
 
-    return res.status(200).json({ success: true, message: "Coordinator removed successfully." });
+    return res.status(200).json({ success: true, message: "Coordinator designation removed successfully." });
   } catch (err) {
     console.error("Error removing coordinator:", err);
     return res.status(500).json({ error: "Failed to remove coordinator." });
