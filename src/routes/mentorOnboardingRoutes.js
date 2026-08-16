@@ -76,7 +76,7 @@ router.post('/send-invites', async (req, res) => {
   }
 });
 
-// 3. FIRST TIME PASSWORD SETTINGS & DB INSERTION
+// 3. FIRST TIME PASSWORD SETTINGS & DB INSERTION / UPDATE
 router.post('/finalize-setup', (req, res) => {
   const { token, username, password } = req.body;
 
@@ -89,53 +89,44 @@ router.post('/finalize-setup', (req, res) => {
     const { email, name, phone, groupId, academicUnit, level } = JSON.parse(rawData);
     const targetLevel = level || 1;
     const targetGroupId = groupId ? Number(groupId) : null;
-
-    // Use full name from CSV token (fallback to username if empty)
     const mentorFullName = (name && name.trim()) ? name.trim() : username;
 
     db.query("SELECT id FROM users WHERE email = ?", [email], (err, users) => {
       if (err) return res.status(500).json({ error: "Database error during duplicate checks." });
-      if (users.length > 0) return res.status(400).json({ error: "An account with this email already exists." });
 
-      // Clean insertion saving full name and phone number
-      const insertUserSql = `
-        INSERT INTO users (name, email, phone, password, role, academic_unit, level, designation) 
-        VALUES (?, ?, ?, ?, 'mentor', ?, ?, NULL)
-      `;
-
-      db.query(insertUserSql, [mentorFullName, email, phone || null, password, academicUnit || 'ITM', targetLevel], (err, insertResult) => {
-        if (err) {
-          console.error("❌ Error creating mentor user in DB:", err);
-          return res.status(500).json({ error: "Failed to create user profile in database." });
-        }
-
-        const newMentorId = insertResult.insertId;
-
-        // Link mentor to group
+      const handleGroupLink = (userId) => {
         if (targetGroupId) {
-          const updateGroupSql = `
-            UPDATE project_groups 
-            SET mentor_id = ? 
-            WHERE id = ?
-          `;
-
-          db.query(updateGroupSql, [newMentorId, targetGroupId], (updateErr) => {
-            if (updateErr) {
-              console.error("Warning: Could not link mentor_id in project_groups:", updateErr);
-            }
-            
-            return res.status(200).json({ 
-              success: true, 
-              message: "Account configured successfully! You may now log in." 
-            });
+          db.query("UPDATE project_groups SET mentor_id = ? WHERE id = ?", [userId, targetGroupId], (updateErr) => {
+            if (updateErr) console.error("Warning: Could not link mentor_id in project_groups:", updateErr);
+            return res.status(200).json({ success: true, message: "Account setup complete!" });
           });
         } else {
-          return res.status(200).json({ 
-            success: true, 
-            message: "Account configured successfully! You may now log in." 
-          });
+          return res.status(200).json({ success: true, message: "Account setup complete!" });
         }
-      });
+      };
+
+      if (users.length > 0) {
+        // Update existing mentor record and ensure is_verified = 1
+        const userId = users[0].id;
+        const updateSql = `UPDATE users SET name = ?, password = ?, is_verified = 1 WHERE id = ?`;
+        db.query(updateSql, [mentorFullName, password, userId], (updateErr) => {
+          if (updateErr) return res.status(500).json({ error: "Failed to update mentor profile." });
+          handleGroupLink(userId);
+        });
+      } else {
+        // Insert new mentor with is_verified = 1
+        const insertUserSql = `
+          INSERT INTO users (name, email, phone, password, role, academic_unit, level, designation, is_verified) 
+          VALUES (?, ?, ?, ?, 'mentor', ?, ?, NULL, 1)
+        `;
+        db.query(insertUserSql, [mentorFullName, email, phone || null, password, academicUnit || 'ITM', targetLevel], (insertErr, insertResult) => {
+          if (insertErr) {
+            console.error("❌ Error creating mentor user in DB:", insertErr);
+            return res.status(500).json({ error: "Failed to create user profile in database." });
+          }
+          handleGroupLink(insertResult.insertId);
+        });
+      }
     });
 
   } catch (e) {
