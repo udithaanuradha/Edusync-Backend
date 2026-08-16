@@ -66,21 +66,12 @@ app.post("/api/login", (req, res) => {
       if (!results.length)
         return res.status(401).json({ error: "Invalid credentials" });
 
-      const user = results[0];
+      const user = normalizeUserForClient(results[0]);
 
       if (!user.is_verified) {
         return res.status(403).json({ error: "Please verify your email before logging in" });
       }
       delete user.is_verified;
-
-      // Normalize 'industry mentor' → 'mentor' before sending to frontend
-      if (user.role === 'industry mentor') {
-        user.role = 'mentor';
-      }
-
-      if (!user.designation) {
-        user.designation = null;
-      }
 
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
