@@ -66,7 +66,6 @@ app.post("/api/login", (req, res) => {
       if (!results.length)
         return res.status(401).json({ error: "Invalid credentials" });
 
-<<<<<<< Updated upstream
       const user = results[0];
 
       if (!user.is_verified) {
@@ -82,9 +81,6 @@ app.post("/api/login", (req, res) => {
       if (!user.designation) {
         user.designation = null;
       }
-=======
-      const user = normalizeUserForClient(results[0]);
->>>>>>> Stashed changes
 
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
