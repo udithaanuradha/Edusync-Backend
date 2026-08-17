@@ -12,4 +12,7 @@ router.get('/supervisor/:supervisorId', verifyToken, meetingRequestController.ge
 // Update status of a meeting request (Approve/Reject)
 router.put('/:id/status', verifyToken, meetingRequestController.updateStatus);
 
+// Get meeting requests for a specific student
+router.get('/student/:studentId', verifyToken, meetingRequestController.getRequestsForStudent);
+
 module.exports = router;
