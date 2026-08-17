@@ -329,15 +329,8 @@ app.use("/api/dashboard", dashboardRoutes);
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
 
-// Backup Schedule Routes
-const backupRoutes = require("./src/routes/backupRoutes");
-app.use("/api/backups", backupRoutes);
-
 const mentorRoutes = require("./src/routes/mentorRoutes");
-app.use("/api/mentor", mentorRoutes);
-
-const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
-app.use("/api/admin/mentors", mentorOnboardingRoutes);
+app.use("/api/mentor", mentorRoutes); 
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
