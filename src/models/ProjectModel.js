@@ -1,6 +1,10 @@
 const db = require('../config/db');
 
 const getStagesByLevel = (level, coordinatorId, callback) => {
+    if (typeof coordinatorId === 'function') {
+        callback = coordinatorId;
+        coordinatorId = null;
+    }
     // First get all stages for this level created by this coordinator
     let query = 'SELECT * FROM project_stages WHERE level = ?';
     let params = [level];

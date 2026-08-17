@@ -329,7 +329,14 @@ const getStudentSummary = async (req, res) => {
   }
 };
 
+const { getMentorDashboard } = require('./mentorController');
+
+const getMentorSummary = async (req, res) => {
+  return getMentorDashboard(req, res);
+};
+
 module.exports = {
   getCoordinatorSummary,
   getStudentSummary,
+  getMentorSummary,
 };
