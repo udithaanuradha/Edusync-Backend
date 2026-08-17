@@ -300,6 +300,9 @@ app.use("/api/users", userRoutes);
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
+const groupDetailsToSupervisorDashboardRoutes = require("./src/routes/groupDetailsToSupervisorDashboardRoutes");
+app.use("/api/groupdetailstosupervisordashboard", groupDetailsToSupervisorDashboardRoutes);
+
 const calendarRoutes = require("./src/routes/calendarRoutes");
 app.use("/api/calendar", calendarRoutes);
 
