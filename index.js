@@ -318,6 +318,9 @@ app.use("/api/messages", messageRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
+app.use("/api/meeting-requests", meetingRequestRoutes);
+
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);
 
