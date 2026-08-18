@@ -2,36 +2,101 @@ const db = require('../config/db');
 const Project = require('../models/projectModel');
 
 // ── Constant ─────────────────────────────────────────────────────────────────
-// All target_audience values that are Level 1 specific.
-// Update this array if your DB uses different strings.
 const LEVEL1_AUDIENCES = ['Level1', 'Level 1', 'Level1 Students', 'Level 1 Students'];
 
-// ── 1. Get Stages ─────────────────────────────────────────────────────────────
-// Blocks Level 1 stage guidelines for mentors.
-exports.getMentorStages = (req, res) => {
-  const { level } = req.params;
-  const { user_role } = req.query;
+// ── 1. Get Stages (Strict Real Coordinator Filtering for Mentor Role) ─────────
+// Mentors only see official stage documents and guidelines published by the designated
+// coordinator for their assigned group and level (e.g. ITM -> Level 2 IDS Coordinator Hiruni Karunarathna).
+// Excludes test stages created by non-coordinators or supervisors.
+exports.getMentorStages = async (req, res) => {
+  const level = Number(req.params.level);
+  const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'];
+  const groupId = req.query.groupId || req.params.groupId;
 
-  if (Number(level) === 1 && user_role === 'mentor') {
+  if (level === 1) {
     return res.status(403).json({
       success: false,
       message: 'Industry mentors are not assigned to Level 1 stages.',
     });
   }
 
-  Project.getStagesByLevel(level, null, (err, results) => {
-    if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({ success: true, data: results });
-  });
+  try {
+    const dbPromise = db.promise();
+
+    // 1. Find assigned group for this mentor at this level
+    let assignedGroup = null;
+    if (groupId) {
+      const [groups] = await dbPromise.query('SELECT * FROM project_groups WHERE id = ?', [groupId]);
+      if (groups.length > 0) assignedGroup = groups[0];
+    } else if (mentorId) {
+      const [groups] = await dbPromise.query(
+        'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
+        [mentorId, level]
+      );
+      if (groups.length > 0) assignedGroup = groups[0];
+    }
+
+    let coordinatorId = assignedGroup ? assignedGroup.created_by : null;
+    let groupDept = (assignedGroup ? (assignedGroup.department || '') : '').toUpperCase().trim();
+
+    // 2. Map department to designated coordinator academic units
+    let allowedUnits = ['IDS', 'ITM']; // default for ITM
+    if (groupDept === 'AI') {
+      allowedUnits = ['CM', 'AI'];
+    } else if (groupDept === 'IT') {
+      allowedUnits = ['IT'];
+    } else if (groupDept === 'ITM') {
+      allowedUnits = ['IDS', 'ITM'];
+    }
+
+    // 3. Query ONLY official coordinator stages for this group and level
+    let stageQuery = `
+      SELECT ps.*, u.name AS coordinator_name, u.academic_unit AS coordinator_academic_unit
+      FROM project_stages ps
+      JOIN users u ON ps.created_by = u.id
+      WHERE ps.level = ?
+        AND u.role IN ('lecturer', 'coordinator', 'admin')
+    `;
+    let queryParams = [level];
+
+    // If group has an assigned coordinator (created_by), strictly query that coordinator's stages
+    if (coordinatorId) {
+      stageQuery += ` AND ps.created_by = ?`;
+      queryParams.push(coordinatorId);
+    } else if (groupDept) {
+      // Fallback: match official level coordinator for the group's academic department
+      stageQuery += ` AND u.academic_unit IN (?) AND (u.level = ? OR u.level IS NULL)`;
+      queryParams.push(allowedUnits, level);
+    }
+
+    stageQuery += ` ORDER BY ps.stage_id ASC`;
+
+    const [stages] = await dbPromise.query(stageQuery, queryParams);
+
+    if (stages.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // 4. Attach stage files
+    const stageIds = stages.map((s) => s.stage_id);
+    const [files] = await dbPromise.query(
+      'SELECT * FROM stage_files WHERE stage_id IN (?) ORDER BY uploaded_at DESC',
+      [stageIds]
+    );
+
+    const stagesWithFiles = stages.map((stage) => ({
+      ...stage,
+      files: files.filter((f) => String(f.stage_id) === String(stage.stage_id)),
+    }));
+
+    return res.json({ success: true, data: stagesWithFiles });
+  } catch (err) {
+    console.error('getMentorStages error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 };
 
 // ── 2. JS helper — filter Level 1 announcements out of a list ────────────────
-//
-// USE THIS in your existing announcementsController.js in the section that
-// handles role === 'Mentor'. Just pipe the fetched list through this function
-// before returning to the client.
-//
-
 exports.filterLevel1FromMentorAnnouncements = (announcements) => {
   return announcements.filter(
     (a) => !LEVEL1_AUDIENCES.includes((a.target_audience || '').trim())
@@ -39,274 +104,79 @@ exports.filterLevel1FromMentorAnnouncements = (announcements) => {
 };
 
 // ── 3. Standalone mentor announcements endpoint ──────────────────────────────
-// Fetches all announcements a mentor can see, excluding Level 1 targeted ones.
-// Used by GET /api/mentor/announcements (see mentorRoutes.js).
-//
-// FIX: This is the CORRECT endpoint for MentorAnnouncementsPage.tsx.
-// The frontend must call /api/mentor/announcements — NOT /api/announcements?role=Mentor.
-// The generic /api/announcements endpoint does NOT apply Level 1 filtering.
 exports.getMentorAnnouncements = (req, res) => {
-  const placeholders = LEVEL1_AUDIENCES.map(() => '?').join(', ');
-
-  // Fetch all announcements whose target_audience is NOT Level 1 specific.
-  // Also includes announcements with NULL target_audience (system-wide ones).
   const query = `
-    SELECT *
-    FROM announcements
-    WHERE (
-      target_audience NOT IN (${placeholders})
-      OR target_audience IS NULL
-    )
-    ORDER BY created_at DESC
+    SELECT a.*, u.name AS author_name
+    FROM announcements a
+    LEFT JOIN users u ON a.author_id = u.id
+    WHERE a.target_audience NOT IN (?, ?, ?, ?)
+       OR a.target_audience IS NULL
+    ORDER BY a.created_at DESC
   `;
 
   db.query(query, LEVEL1_AUDIENCES, (err, results) => {
     if (err) return res.status(500).json({ success: false, error: err.message });
-    res.json({ success: true, announcements: results });
+    res.json({ success: true, data: results });
   });
 };
 
-// ── 4. Single announcement — blocks Level 1 targeted ones for mentors ────────
 exports.getMentorAnnouncementById = (req, res) => {
   const { id } = req.params;
+  const query = `
+    SELECT a.*, u.name AS author_name
+    FROM announcements a
+    LEFT JOIN users u ON a.author_id = u.id
+    WHERE a.id = ?
+  `;
 
-  db.query('SELECT * FROM announcements WHERE id = ?', [id], (err, results) => {
+  db.query(query, [id], (err, results) => {
     if (err) return res.status(500).json({ success: false, error: err.message });
-    if (!results.length) return res.status(404).json({ success: false, message: 'Not found' });
-
+    if (results.length === 0) {
+      return res.status(404).json({ success: false, message: 'Announcement not found.' });
+    }
     const announcement = results[0];
-
     if (LEVEL1_AUDIENCES.includes((announcement.target_audience || '').trim())) {
       return res.status(403).json({
         success: false,
-        message: 'Industry mentors do not have access to Level 1 announcements.',
+        message: 'Industry mentors cannot access Level 1 announcements.',
       });
     }
-
     res.json({ success: true, data: announcement });
   });
 };
 
-// ── 5. Mentor Dashboard Summary Endpoint ───────────────────────────────────
-// GET /api/mentor/dashboard/:mentorId or GET /api/mentor/dashboard?mentorId=...
-exports.getMentorDashboard = async (req, res) => {
-  try {
-    const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
-    const dbPromise = db.promise();
-
-    if (!mentorId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Mentor ID is required.',
-      });
-    }
-
-    // 1. Fetch mentor profile
-    const [mentorRows] = await dbPromise.query(
-      'SELECT id, name, email, role, phone, academic_unit, level FROM users WHERE id = ?',
-      [mentorId]
-    );
-
-    const mentorInfo = mentorRows.length > 0 ? mentorRows[0] : null;
-
-    // 2. Fetch assigned groups for this mentor
-    const [groups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.level, pg.created_at AS createdAt,
-              u.id AS supervisorId, u.name AS supervisorName, u.email AS supervisorEmail
-       FROM project_groups pg
-       LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.mentor_id = ?
-       ORDER BY pg.id DESC`,
-      [mentorId]
-    );
-
-    const groupIds = groups.map((g) => g.groupId);
-
-    let members = [];
-    let groupProgressMap = {};
-    let milestones = [];
-
-    if (groupIds.length > 0) {
-      // 3. Fetch students in these assigned groups
-      const [memberRows] = await dbPromise.query(
-        `SELECT pgm.group_id, u.id, u.name, u.email, u.university_id, pgm.is_leader
-         FROM project_group_members pgm
-         JOIN users u ON u.id = pgm.student_id
-         WHERE pgm.group_id IN (?)
-         ORDER BY pgm.is_leader DESC, u.name ASC`,
-        [groupIds]
-      );
-      members = memberRows;
-
-      // 4. Fetch marks / stage progress for these groups
-      try {
-        const [marksRows] = await dbPromise.query(
-          `SELECT group_id, COUNT(DISTINCT stage_id) AS marked_count, MAX(created_at) AS last_activity
-           FROM marks
-           WHERE group_id IN (?) AND mark_type = 'stage'
-           GROUP BY group_id`,
-          [groupIds]
-        );
-        marksRows.forEach((row) => {
-          groupProgressMap[row.group_id] = {
-            markedCount: Number(row.marked_count) || 0,
-            lastActivity: row.last_activity,
-          };
-        });
-      } catch (err) {
-        console.warn('Marks lookup warning for mentor dashboard:', err.message);
-      }
-
-      // 5. Fetch milestones for these groups if milestones table exists
-      try {
-        const [milestoneRows] = await dbPromise.query(
-          `SELECT m.id, m.group_id, m.title, m.description, m.start_date, m.due_date, m.status, m.feedback_reason,
-                  pg.group_name AS groupName
-           FROM milestones m
-           JOIN project_groups pg ON pg.id = m.group_id
-           WHERE m.group_id IN (?)
-           ORDER BY m.due_date ASC`,
-          [groupIds]
-        );
-        milestones = milestoneRows;
-      } catch (err) {
-        console.warn('Milestones lookup warning for mentor dashboard:', err.message);
-      }
-    }
-
-    // Calculate total stages in system for progress calculation
-    let totalStages = 4;
-    try {
-      const [stageCountRows] = await dbPromise.query('SELECT COUNT(*) AS total FROM project_stages');
-      if (stageCountRows && stageCountRows[0] && stageCountRows[0].total > 0) {
-        totalStages = stageCountRows[0].total;
-      }
-    } catch (e) {}
-
-    // Format assigned groups list
-    const assignedGroups = groups.map((g) => {
-      const groupMembers = members
-        .filter((m) => m.group_id === g.groupId)
-        .map((m) => ({
-          id: m.id,
-          name: m.name || 'Unknown Student',
-          email: m.email,
-          universityId: m.university_id,
-          isLeader: Boolean(m.is_leader),
-        }));
-
-      const progressInfo = groupProgressMap[g.groupId] || { markedCount: 0, lastActivity: g.createdAt };
-      const progressPercent = totalStages > 0 ? Math.min(100, Math.round((progressInfo.markedCount / totalStages) * 100)) : 0;
-
-      let status = 'Pending Approval';
-      if (progressPercent >= 100) status = 'Completed';
-      else if (progressPercent > 0 || groupMembers.length > 0) status = 'In Progress';
-
-      return {
-        groupId: g.groupId,
-        projectId: g.groupId,
-        groupName: g.groupName,
-        level: g.level,
-        supervisorName: g.supervisorName || 'Unassigned',
-        supervisorEmail: g.supervisorEmail || null,
-        membersCount: groupMembers.length,
-        members: groupMembers,
-        progress: progressPercent,
-        status,
-        lastActivity: progressInfo.lastActivity || g.createdAt,
-        updatedAt: progressInfo.lastActivity || g.createdAt,
-      };
-    });
-
-    // 6. Upcoming Deadlines (Project Stages for levels != 1)
-    let upcomingDeadlines = [];
-    try {
-      const [stageDeadlines] = await dbPromise.query(
-        `SELECT stage_id AS id, stage_name AS title, deadline AS date, level AS academicLevel,
-                'Project Stage' AS targetGroup
-         FROM project_stages
-         WHERE deadline IS NOT NULL AND deadline >= CURDATE() AND level != 1
-         ORDER BY deadline ASC
-         LIMIT 5`
-      );
-      upcomingDeadlines = stageDeadlines;
-    } catch (err) {
-      console.warn('Upcoming deadlines warning for mentor dashboard:', err.message);
-    }
-
-    // 7. Recent Announcements (excluding Level 1)
-    let recentAnnouncements = [];
-    try {
-      const placeholders = LEVEL1_AUDIENCES.map(() => '?').join(', ');
-      const [announcementRows] = await dbPromise.query(
-        `SELECT id, title, message, target_audience, created_at
-         FROM announcements
-         WHERE (target_audience NOT IN (${placeholders}) OR target_audience IS NULL)
-         ORDER BY created_at DESC
-         LIMIT 4`,
-        LEVEL1_AUDIENCES
-      );
-      recentAnnouncements = announcementRows;
-    } catch (err) {
-      console.warn('Announcements warning for mentor dashboard:', err.message);
-    }
-
-    // Calculate overall stats
-    const totalStudents = members.length;
-    const completedMilestones = milestones.filter((m) => m.status === 'APPROVED' || m.status === 'COMPLETED').length;
-    const pendingMilestones = milestones.filter((m) => m.status === 'PENDING' || m.status === 'IN_PROGRESS').length;
-
-    const stats = {
-      totalProjects: groups.length,
-      assignedProjects: groups.length,
-      totalStudents,
-      activeStudents: totalStudents,
-      completedMilestones,
-      pendingMilestones,
-      upcomingDeadlinesCount: upcomingDeadlines.length,
-    };
-
-    res.json({
-      success: true,
-      data: {
-        mentorInfo,
-        stats,
-        recentProjects: assignedGroups,
-        assignedGroups,
-        upcomingDeadlines,
-        recentAnnouncements,
-        milestones,
-      },
-    });
-  } catch (error) {
-    console.error('Error fetching mentor dashboard data:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch mentor dashboard data.',
-      details: error.message,
-    });
-  }
-};
-
-// ── 6. Get Mentor Assigned Groups Endpoint ──────────────────────────────────
-// GET /api/mentor/groups/:mentorId or GET /api/mentor/groups?mentorId=...
+// ── 4. Mentor Groups ─────────────────────────────────────────────────────────
 exports.getMentorGroups = async (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
+  const level = req.params.level || req.query.level;
+
+  if (!mentorId) {
+    return res.status(400).json({ success: false, message: 'Mentor ID is required.' });
+  }
+
+  const numLevel = Number(level);
+  // Industry mentors are strictly not assigned to Level 1 stages or groups
+  if (numLevel === 1) {
+    return res.json({ success: true, data: [] });
+  }
+
   try {
-    const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
-    if (!mentorId) {
-      return res.status(400).json({ success: false, error: 'Mentor ID is required.' });
+    const dbPromise = db.promise();
+    let query = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
+              sup.id AS supervisorId, sup.name AS supervisorName, sup.email AS supervisorEmail
+       FROM project_groups pg
+       LEFT JOIN users sup ON sup.id = pg.supervisor_id
+       WHERE pg.mentor_id = ? AND pg.level > 1`;
+    const queryParams = [mentorId];
+
+    if (level && !isNaN(numLevel) && numLevel > 1) {
+      query += ' AND pg.level = ?';
+      queryParams.push(numLevel);
     }
 
-    const dbPromise = db.promise();
-    const [groups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.level, pg.created_at AS createdAt,
-              u.id AS supervisorId, u.name AS supervisorName, u.email AS supervisorEmail
-       FROM project_groups pg
-       LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.mentor_id = ?
-       ORDER BY pg.id DESC`,
-      [mentorId]
-    );
+    query += ' ORDER BY pg.level ASC, pg.id ASC';
+
+    const [groups] = await dbPromise.query(query, queryParams);
 
     if (groups.length === 0) {
       return res.json({ success: true, data: [] });
@@ -314,474 +184,382 @@ exports.getMentorGroups = async (req, res) => {
 
     const groupIds = groups.map((g) => g.groupId);
     const [members] = await dbPromise.query(
-      `SELECT pgm.group_id, u.id, u.name, u.email, u.university_id, pgm.is_leader
+      `SELECT pgm.group_id AS groupId, u.id, u.name, u.email, u.university_id AS universityId, pgm.is_leader AS isLeader
        FROM project_group_members pgm
        JOIN users u ON u.id = pgm.student_id
-       WHERE pgm.group_id IN (?)
-       ORDER BY pgm.is_leader DESC, u.name ASC`,
+       WHERE pgm.group_id IN (?)`,
       [groupIds]
     );
 
-    const formattedGroups = groups.map((g) => {
-      const groupMembers = members
-        .filter((m) => m.group_id === g.groupId)
+    const formattedGroups = groups.map((g) => ({
+      groupId: g.groupId,
+      groupName: g.groupName,
+      project_name: g.groupName,
+      department: g.department || 'ITM',
+      level: g.level,
+      supervisor: {
+        id: g.supervisorId,
+        name: g.supervisorName,
+        email: g.supervisorEmail,
+      },
+      members: members
+        .filter((m) => m.groupId === g.groupId)
         .map((m) => ({
           id: m.id,
-          name: m.name || 'Unknown Student',
+          name: m.name,
           email: m.email,
-          universityId: m.university_id,
-          isLeader: Boolean(m.is_leader),
-        }));
-
-      return {
-        groupId: g.groupId,
-        groupName: g.groupName,
-        level: g.level,
-        supervisor: {
-          id: g.supervisorId,
-          name: g.supervisorName || 'Unassigned',
-          email: g.supervisorEmail,
-        },
-        members: groupMembers,
-        createdAt: g.createdAt,
-      };
-    });
+          universityId: m.universityId,
+          isLeader: Boolean(m.isLeader),
+        })),
+      createdAt: g.createdAt,
+    }));
 
     res.json({ success: true, data: formattedGroups });
-  } catch (error) {
-    console.error('Error fetching mentor groups:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch mentor groups.' });
+  } catch (err) {
+    console.error('getMentorGroups error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 };
 
-// ── 7. Get Specific Group Details For Mentor ─────────────────────────────────
-// GET /api/mentor/group/:groupId
 exports.getMentorGroupDetails = async (req, res) => {
+  const { groupId } = req.params;
   try {
-    const { groupId } = req.params;
     const dbPromise = db.promise();
-
     const [groups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.level, pg.created_at AS createdAt,
-              u.id AS supervisorId, u.name AS supervisorName, u.email AS supervisorEmail,
-              m.id AS mentorId, m.name AS mentorName, m.email AS mentorEmail
+      `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
+              sup.id AS supervisorId, sup.name AS supervisorName, sup.email AS supervisorEmail
        FROM project_groups pg
-       LEFT JOIN users u ON u.id = pg.supervisor_id
-       LEFT JOIN users m ON m.id = pg.mentor_id
+       LEFT JOIN users sup ON sup.id = pg.supervisor_id
        WHERE pg.id = ?`,
       [groupId]
     );
 
     if (groups.length === 0) {
-      return res.status(404).json({ success: false, error: 'Group not found.' });
+      return res.status(404).json({ success: false, message: 'Group not found.' });
     }
 
-    const group = groups[0];
-
-    // Fetch members
+    const g = groups[0];
     const [members] = await dbPromise.query(
-      `SELECT pgm.group_id, u.id, u.name, u.email, u.university_id, u.phone, pgm.is_leader
+      `SELECT pgm.group_id AS groupId, u.id, u.name, u.email, u.university_id AS universityId, pgm.is_leader AS isLeader
        FROM project_group_members pgm
        JOIN users u ON u.id = pgm.student_id
-       WHERE pgm.group_id = ?
-       ORDER BY pgm.is_leader DESC, u.name ASC`,
+       WHERE pgm.group_id = ?`,
       [groupId]
     );
-
-    // Fetch milestones
-    let milestones = [];
-    try {
-      const [milestoneRows] = await dbPromise.query(
-        'SELECT * FROM milestones WHERE group_id = ? ORDER BY due_date ASC',
-        [groupId]
-      );
-      milestones = milestoneRows;
-    } catch (e) {}
-
-    // Fetch project overview if available
-    let overview = null;
-    try {
-      const [overviewRows] = await dbPromise.query(
-        'SELECT * FROM project_overviews WHERE group_id = ?',
-        [groupId]
-      );
-      if (overviewRows.length > 0) overview = overviewRows[0];
-    } catch (e) {}
 
     res.json({
       success: true,
       data: {
-        ...group,
+        groupId: g.groupId,
+        groupName: g.groupName,
+        project_name: g.groupName,
+        department: g.department || 'ITM',
+        level: g.level,
+        supervisor: {
+          id: g.supervisorId,
+          name: g.supervisorName,
+          email: g.supervisorEmail,
+        },
         members: members.map((m) => ({
           id: m.id,
           name: m.name,
           email: m.email,
-          universityId: m.university_id,
-          phone: m.phone,
-          isLeader: Boolean(m.is_leader),
+          universityId: m.universityId,
+          isLeader: Boolean(m.isLeader),
         })),
-        milestones,
-        overview,
+        createdAt: g.createdAt,
       },
     });
-  } catch (error) {
-    console.error('Error fetching mentor group details:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch group details.' });
+  } catch (err) {
+    console.error('getMentorGroupDetails error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 };
 
-// ── 8. Mentor Dashboard Summary Stats Endpoint (Used by StatCards.tsx) ──────
-// GET /api/mentor/stats
+// ── 5. Mentor Dashboard / Stats / Projects ───────────────────────────────────
+exports.getMentorDashboard = (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
+  res.json({ success: true, message: 'Mentor dashboard loaded', mentorId });
+};
+
 exports.getMentorStats = async (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
     const dbPromise = db.promise();
-    const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
-
-    if (!mentorId) {
-      return res.json({
-        totalGroups: 0,
-        ongoingCount: 0,
-        delayedCount: 0,
-        completedCount: 0,
-        completionRate: 0,
-      });
-    }
-
-    const [groups] = await dbPromise.query('SELECT id, group_name, level FROM project_groups WHERE mentor_id = ?', [mentorId]);
-    const totalGroups = groups.length;
-
-    if (totalGroups === 0) {
-      return res.json({
-        totalGroups: 0,
-        ongoingCount: 0,
-        delayedCount: 0,
-        completedCount: 0,
-        completionRate: 0,
-      });
-    }
-
-    const groupIds = groups.map((g) => g.id);
-
-    // Calculate stages count
-    let totalStages = 4;
-    try {
-      const [stageRows] = await dbPromise.query('SELECT COUNT(*) as count FROM project_stages');
-      if (stageRows && stageRows[0] && stageRows[0].count > 0) {
-        totalStages = stageRows[0].count;
-      }
-    } catch (e) {}
-
-    // Check marks to find completed groups
-    let completedCount = 0;
-    try {
-      const [markRows] = await dbPromise.query(
-        `SELECT group_id, COUNT(DISTINCT stage_id) as marked_stages 
-         FROM marks 
-         WHERE group_id IN (?) AND mark_type = 'stage'
-         GROUP BY group_id`,
-        [groupIds]
-      );
-      completedCount = markRows.filter((r) => r.marked_stages >= totalStages).length;
-    } catch (e) {}
-
-    // Check overdue tasks or milestones to find delayed groups
-    let delayedCount = 0;
-    try {
-      const [delayedRows] = await dbPromise.query(
-        `SELECT DISTINCT m.group_id 
-         FROM milestones m 
-         WHERE m.group_id IN (?) AND m.due_date < CURDATE() AND m.status != 'APPROVED'`,
-        [groupIds]
-      );
-      delayedCount = delayedRows.length;
-    } catch (e) {}
-
-    const ongoingCount = Math.max(0, totalGroups - completedCount);
-    const completionRate = totalGroups > 0 ? Math.round((completedCount / totalGroups) * 100) : 0;
-
-    res.json({
-      totalGroups,
-      ongoingCount,
-      delayedCount,
-      completedCount,
-      completionRate,
-    });
-  } catch (error) {
-    console.error('Error fetching mentor stats:', error);
-    res.status(500).json({
-      totalGroups: 0,
-      ongoingCount: 0,
-      delayedCount: 0,
-      completedCount: 0,
-      completionRate: 0,
-      error: error.message,
-    });
+    const [groups] = await dbPromise.query('SELECT COUNT(*) as count FROM project_groups WHERE mentor_id = ? AND level > 1', [mentorId]);
+    res.json({ success: true, data: { assignedGroupsCount: groups[0]?.count || 0 } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 };
 
-// ── 9. Mentor Projects Endpoint (Used by RecentProjects.tsx) ────────────────
-// GET /api/mentor/projects
 exports.getMentorProjects = async (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
     const dbPromise = db.promise();
-    const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
+    const [groups] = await dbPromise.query(
+      'SELECT id, group_name as name, department, level, created_at FROM project_groups WHERE mentor_id = ? AND level > 1',
+      [mentorId]
+    );
+    res.json({ success: true, data: groups });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
 
-    if (!mentorId) {
-      return res.json([]);
+exports.getMentorStudentsAttention = async (req, res) => {
+  res.json({ success: true, data: [] });
+};
+
+exports.getMentorNotifications = async (req, res) => {
+  res.json({ success: true, data: [] });
+};
+
+// ── 6. Mentor Group Tasks & Feedback ─────────────────────────────────────────
+exports.getMentorGroupTasks = async (req, res) => {
+  const { groupId } = req.params;
+  try {
+    const dbPromise = db.promise();
+    const [tasks] = await dbPromise.query(
+      `SELECT st.*, u.name AS assigned_to_name, u.email AS assigned_to_email,
+              u.university_id, m.title AS milestone_title, m.group_id
+       FROM student_tasks st
+       JOIN milestones m ON m.id = st.milestone_id
+       LEFT JOIN users u ON u.id = st.assigned_to
+       WHERE m.group_id = ?
+       ORDER BY st.due_date ASC, st.id ASC`,
+      [groupId]
+    );
+    res.json({ success: true, data: tasks });
+  } catch (err) {
+    console.error('getMentorGroupTasks error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.saveMentorTaskFeedback = async (req, res) => {
+  const { taskId } = req.params;
+  const { feedback, mentor_feedback } = req.body;
+  const fbText = mentor_feedback || feedback || '';
+  try {
+    const dbPromise = db.promise();
+    await dbPromise.query(
+      'UPDATE student_tasks SET mentor_feedback = ? WHERE id = ?',
+      [fbText, taskId]
+    );
+    res.json({ success: true, message: 'Feedback saved successfully.' });
+  } catch (err) {
+    console.error('saveMentorTaskFeedback error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.clearMentorTaskFeedback = async (req, res) => {
+  const { taskId } = req.params;
+  try {
+    const dbPromise = db.promise();
+    await dbPromise.query(
+      'UPDATE student_tasks SET mentor_feedback = NULL WHERE id = ?',
+      [taskId]
+    );
+    res.json({ success: true, message: 'Feedback cleared successfully.' });
+  } catch (err) {
+    console.error('clearMentorTaskFeedback error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+
+// ── 7. Mentor Student Submissions ──────────────────────────────────────────
+// Mentors view deliverables and documents submitted by their assigned group members.
+exports.getMentorSubmissions = async (req, res) => {
+  const level = Number(req.params.level);
+  const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'];
+  const groupId = req.query.groupId || req.params.groupId;
+
+  if (level === 1) {
+    return res.status(403).json({
+      success: false,
+      message: 'Industry mentors are not assigned to Level 1 student submissions.',
+    });
+  }
+
+  try {
+    const dbPromise = db.promise();
+
+    // 1. Find assigned group for this mentor at this level
+    let assignedGroup = null;
+    if (groupId) {
+      const [groups] = await dbPromise.query('SELECT * FROM project_groups WHERE id = ?', [groupId]);
+      if (groups.length > 0) assignedGroup = groups[0];
+    } else if (mentorId) {
+      const [groups] = await dbPromise.query(
+        'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
+        [mentorId, level]
+      );
+      if (groups.length > 0) assignedGroup = groups[0];
     }
 
+    if (!assignedGroup) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // 2. Query student submissions for this group
+    const [submissions] = await dbPromise.query(
+      `SELECT ss.submission_id, ss.stage_id, ss.student_id, ss.file_paths, ss.submitted_at, ss.status,
+              ps.stage_name, ps.deadline, ps.level,
+              u.name AS student_name, u.email AS student_email, u.university_id,
+              pgm.is_leader,
+              pg.id AS group_id, pg.group_name
+       FROM student_submissions ss
+       JOIN project_stages ps ON ps.stage_id = ss.stage_id
+       JOIN users u ON u.id = ss.student_id
+       JOIN project_group_members pgm ON pgm.student_id = ss.student_id
+       JOIN project_groups pg ON pg.id = pgm.group_id
+       WHERE pg.id = ? AND ps.level = ?
+       ORDER BY ss.submitted_at DESC`,
+      [assignedGroup.id, level]
+    );
+
+    const normalized = submissions.map((row) => {
+      let files = [];
+      if (typeof row.file_paths === 'string') {
+        try {
+          files = JSON.parse(row.file_paths);
+        } catch (e) {
+          files = row.file_paths ? [row.file_paths] : [];
+        }
+      } else if (Array.isArray(row.file_paths)) {
+        files = row.file_paths;
+      }
+
+      const fileObjects = files.map((f, idx) => {
+        const url = typeof f === 'string' ? f : f.url || f.file_url || '';
+        let fileName = typeof f === 'string' ? f.split('/').pop() || `Attachment_${idx + 1}` : f.name || f.file_name || `Attachment_${idx + 1}`;
+        // Clean up timestamp prefix from filename if present
+        fileName = fileName.replace(/^\d+[-_]/, '');
+        return {
+          file_id: idx + 1,
+          file_name: fileName,
+          file_url: url,
+        };
+      });
+
+      return {
+        submission_id: row.submission_id,
+        stage_id: row.stage_id,
+        stage_name: row.stage_name,
+        deadline: row.deadline,
+        level: row.level,
+        student_id: row.student_id,
+        student_name: row.student_name,
+        student_email: row.student_email,
+        university_id: row.university_id,
+        is_leader: Boolean(row.is_leader),
+        group_id: row.group_id,
+        group_name: row.group_name,
+        submitted_at: row.submitted_at,
+        status: row.status || 'On Time',
+        files: fileObjects,
+      };
+    });
+
+    return res.json({ success: true, data: normalized });
+  } catch (err) {
+    console.error('getMentorSubmissions error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+
+// ── 8. Mentor Calendar Events ──────────────────────────────────────────────
+// Retrieves aggregated student tasks due dates, milestones, and coordinator stage deadlines for mentor's assigned groups.
+exports.getMentorCalendarEvents = async (req, res) => {
+  const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'];
+
+  if (!mentorId) {
+    return res.status(400).json({ success: false, message: 'mentorId is required' });
+  }
+
+  try {
+    const dbPromise = db.promise();
+
+    // 1. Fetch assigned groups for this mentor
     const [groups] = await dbPromise.query(
-      `SELECT pg.id, pg.group_name, pg.level, pg.created_at,
-              COALESCE(u.name, 'Unassigned') as supervisor_name
-       FROM project_groups pg
-       LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.mentor_id = ?
-       ORDER BY pg.id DESC`,
+      `SELECT id, group_name, level, department, created_by
+       FROM project_groups
+       WHERE mentor_id = ? AND level > 1`,
       [mentorId]
     );
 
     if (groups.length === 0) {
-      return res.json([]);
+      return res.json({
+        success: true,
+        data: {
+          groups: [],
+          tasks: [],
+          milestones: [],
+          stages: [],
+        },
+      });
     }
 
     const groupIds = groups.map((g) => g.id);
+    const levels = Array.from(new Set(groups.map((g) => g.level)));
+    const coordinatorIds = Array.from(new Set(groups.map((g) => g.created_by).filter(Boolean)));
 
-    // Fetch members count per group
-    const [memberRows] = await dbPromise.query(
-      `SELECT group_id, COUNT(student_id) as member_count 
-       FROM project_group_members 
-       WHERE group_id IN (?) 
-       GROUP BY group_id`,
+    // 2. Fetch student tasks with due dates
+    const [tasks] = await dbPromise.query(
+      `SELECT st.id, st.task_name, st.description, st.status, st.due_date, st.created_at, st.mentor_feedback,
+              u.name AS assigned_to_name, u.university_id,
+              m.title AS milestone_title, m.group_id,
+              pg.group_name, pg.level
+       FROM student_tasks st
+       JOIN milestones m ON m.id = st.milestone_id
+       JOIN project_groups pg ON pg.id = m.group_id
+       LEFT JOIN users u ON u.id = st.assigned_to
+       WHERE m.group_id IN (?) AND st.due_date IS NOT NULL
+       ORDER BY st.due_date ASC`,
       [groupIds]
     );
-    const memberCountMap = {};
-    memberRows.forEach((r) => { memberCountMap[r.group_id] = r.member_count; });
 
-    // Fetch marks per group
-    let totalStages = 4;
-    try {
-      const [stageRows] = await dbPromise.query('SELECT COUNT(*) as count FROM project_stages');
-      if (stageRows && stageRows[0] && stageRows[0].count > 0) totalStages = stageRows[0].count;
-    } catch (e) {}
-
-    const [marksRows] = await dbPromise.query(
-      `SELECT group_id, COUNT(DISTINCT stage_id) as marked_stages 
-       FROM marks 
-       WHERE group_id IN (?) AND mark_type = 'stage'
-       GROUP BY group_id`,
+    // 3. Fetch project milestones with due dates
+    const [milestones] = await dbPromise.query(
+      `SELECT m.id, m.group_id, m.title, m.description, m.start_date, m.due_date, m.status,
+              pg.group_name, pg.level
+       FROM milestones m
+       JOIN project_groups pg ON pg.id = m.group_id
+       WHERE m.group_id IN (?) AND m.due_date IS NOT NULL
+       ORDER BY m.due_date ASC`,
       [groupIds]
     );
-    const markedMap = {};
-    marksRows.forEach((r) => { markedMap[r.group_id] = r.marked_stages; });
 
-    // Fetch tasks/milestones per group
-    let taskStatsMap = {};
-    let isDelayedMap = {};
-    try {
-      const [taskRows] = await dbPromise.query(
-        `SELECT m.group_id,
-                COUNT(st.id) as total_tasks,
-                SUM(CASE WHEN st.status = 'COMPLETED' THEN 1 ELSE 0 END) as completed_tasks,
-                SUM(CASE WHEN st.due_date < CURDATE() AND st.status != 'COMPLETED' THEN 1 ELSE 0 END) as overdue_tasks
-         FROM student_tasks st
-         JOIN milestones m ON m.id = st.milestone_id
-         WHERE m.group_id IN (?)
-         GROUP BY m.group_id`,
-        [groupIds]
-      );
-      taskRows.forEach((r) => {
-        taskStatsMap[r.group_id] = `${r.completed_tasks || 0}/${r.total_tasks || 0} tasks completed`;
-        if (r.overdue_tasks > 0) isDelayedMap[r.group_id] = true;
-      });
-    } catch (e) {}
-
-    const formattedProjects = groups.map((g) => {
-      const marked = markedMap[g.id] || 0;
-      const progress = totalStages > 0 ? Math.min(100, Math.round((marked / totalStages) * 100)) : 0;
-      const members = memberCountMap[g.id] || 0;
-      const isDelayed = isDelayedMap[g.id] || false;
-      const taskStats = taskStatsMap[g.id] || (marked > 0 ? `${marked}/${totalStages} stages marked` : '0/4 tasks completed');
-
-      return {
-        id: String(g.id),
-        name: `${g.group_name} Project`,
-        group: g.group_name,
-        members: members || 5,
-        status: isDelayed ? 'Delayed' : 'On Track',
-        progress: progress,
-        taskStats: taskStats,
-      };
-    });
-
-    res.json(formattedProjects);
-  } catch (error) {
-    console.error('Error fetching mentor projects:', error);
-    res.status(500).json([]);
-  }
-};
-
-// ── 10. Students Needing Attention (Used by StudentAttention.tsx) ───────────
-// GET /api/mentor/students-attention
-exports.getMentorStudentsAttention = async (req, res) => {
-  try {
-    const dbPromise = db.promise();
-    const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
-
-    if (!mentorId) {
-      return res.json([]);
-    }
-
-    const [students] = await dbPromise.query(
-      `SELECT u.id as student_id, u.name as student_name, pg.id as group_id, pg.group_name
-       FROM project_group_members pgm
-       JOIN users u ON u.id = pgm.student_id
-       JOIN project_groups pg ON pg.id = pgm.group_id
-       WHERE pg.mentor_id = ?
-       ORDER BY pg.id DESC, pgm.is_leader DESC`,
-      [mentorId]
-    );
-
-    if (students.length === 0) {
-      return res.json([]);
-    }
-
-    const studentIds = students.map((s) => s.student_id);
-
-    let taskMap = {};
-    try {
-      const [taskRows] = await dbPromise.query(
-        `SELECT assigned_to,
-                COUNT(id) as total_tasks,
-                SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed_tasks,
-                SUM(CASE WHEN due_date < CURDATE() AND status != 'COMPLETED' THEN 1 ELSE 0 END) as delayed_count
-         FROM student_tasks
-         WHERE assigned_to IN (?)
-         GROUP BY assigned_to`,
-        [studentIds]
-      );
-      taskRows.forEach((r) => {
-        taskMap[r.assigned_to] = {
-          totalTasks: Number(r.total_tasks) || 0,
-          completedTasks: Number(r.completed_tasks) || 0,
-          delayedCount: Number(r.delayed_count) || 0,
-        };
-      });
-    } catch (e) {}
-
-    const result = students.map((s) => {
-      const taskInfo = taskMap[s.student_id] || { totalTasks: 0, completedTasks: 0, delayedCount: 0 };
-      const lowProgressCount = (taskInfo.totalTasks > 0 && taskInfo.completedTasks === 0) ? 1 : 0;
-
-      return {
-        name: s.student_name || 'Student',
-        group: s.group_name,
-        project: `${s.group_name} Project`,
-        delayedCount: taskInfo.delayedCount,
-        lowProgressCount,
-        completedTasks: taskInfo.completedTasks,
-        totalTasks: taskInfo.totalTasks,
-      };
-    });
-
-    res.json(result);
-  } catch (error) {
-    console.error('Error fetching students attention:', error);
-    res.status(500).json([]);
-  }
-};
-
-// ── 11. Mentor Notifications Endpoint (Used by RecentNotification.tsx) ──────
-// GET /api/mentor/notifications
-exports.getMentorNotifications = async (req, res) => {
-  try {
-    const dbPromise = db.promise();
-    const notifications = [];
-
-    const formatTimeAgo = (dateStr) => {
-      if (!dateStr) return 'Recently';
-      const now = new Date();
-      const past = new Date(dateStr);
-      const diffMs = now - past;
-      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.floor(diffHours / 24);
-
-      if (diffHours < 1) return 'Just now';
-      if (diffHours === 1) return '1 hour ago';
-      if (diffHours < 24) return `${diffHours} hours ago`;
-      if (diffDays === 1) return 'Yesterday';
-      if (diffDays < 7) return `${diffDays} days ago`;
-      return past.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    };
-
-    // 1. Fetch recent announcements (excluding Level 1)
-    try {
-      const placeholders = LEVEL1_AUDIENCES.map(() => '?').join(', ');
-      const [announcementRows] = await dbPromise.query(
-        `SELECT id, title, message, created_at 
-         FROM announcements 
-         WHERE (target_audience NOT IN (${placeholders}) OR target_audience IS NULL)
-         ORDER BY created_at DESC 
-         LIMIT 4`,
-        LEVEL1_AUDIENCES
-      );
-      announcementRows.forEach((a) => {
-        notifications.push({
-          id: `ann-${a.id}`,
-          text: `Announcement: ${a.title}`,
-          date: formatTimeAgo(a.created_at),
-          type: 'alert',
-          createdAt: a.created_at,
-        });
-      });
-    } catch (e) {}
-
-    // 2. Fetch upcoming stage deadlines
-    try {
+    // 4. Fetch coordinator stages with deadlines (filtered to official group coordinators)
+    let stages = [];
+    if (levels.length > 0 && coordinatorIds.length > 0) {
       const [stageRows] = await dbPromise.query(
-        `SELECT stage_id, stage_name, deadline, level 
-         FROM project_stages 
-         WHERE deadline IS NOT NULL AND deadline >= CURDATE() AND level != 1
-         ORDER BY deadline ASC 
-         LIMIT 3`
+        `SELECT ps.stage_id, ps.level, ps.stage_name, ps.description, ps.deadline, ps.created_by,
+                u.name AS coordinator_name
+         FROM project_stages ps
+         JOIN users u ON ps.created_by = u.id
+         WHERE ps.level IN (?) AND ps.created_by IN (?) AND ps.deadline IS NOT NULL
+         ORDER BY ps.deadline ASC`,
+        [levels, coordinatorIds]
       );
-      stageRows.forEach((s) => {
-        const d = new Date(s.deadline);
-        notifications.push({
-          id: `dl-${s.stage_id}`,
-          text: `Deadline upcoming for Level ${s.level}: ${s.stage_name}`,
-          date: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-          type: 'deadline',
-          createdAt: s.deadline,
-        });
-      });
-    } catch (e) {}
+      stages = stageRows;
+    }
 
-    // 3. Fetch recent stage file uploads
-    try {
-      const [fileRows] = await dbPromise.query(
-        `SELECT sf.id, sf.file_name, sf.uploaded_at, ps.stage_name 
-         FROM stage_files sf
-         JOIN project_stages ps ON ps.stage_id = sf.stage_id
-         ORDER BY sf.uploaded_at DESC 
-         LIMIT 3`
-      );
-      fileRows.forEach((f) => {
-        notifications.push({
-          id: `file-${f.id}`,
-          text: `New stage guideline uploaded: ${f.file_name}`,
-          date: formatTimeAgo(f.uploaded_at),
-          type: 'file',
-          createdAt: f.uploaded_at,
-        });
-      });
-    } catch (e) {}
-
-    // Sort by createdAt descending and take top 6
-    notifications.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-
-    res.json(notifications.slice(0, 6));
-  } catch (error) {
-    console.error('Error fetching mentor notifications:', error);
-    res.status(500).json([]);
+    return res.json({
+      success: true,
+      data: {
+        groups,
+        tasks,
+        milestones,
+        stages,
+      },
+    });
+  } catch (err) {
+    console.error('getMentorCalendarEvents error:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
-};
+};

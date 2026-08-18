@@ -297,6 +297,9 @@ app.use("/api/projects", projectRoutes);
 const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
+const mentorGroupRoutes = require("./src/routes/mentorGroupRoutes");
+app.use("/api/groups", mentorGroupRoutes);
+
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
@@ -331,6 +334,10 @@ app.use("/api/marks", marksRoutes);
 
 const mentorRoutes = require("./src/routes/mentorRoutes");
 app.use("/api/mentor", mentorRoutes); 
+
+const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
+app.use("/api/admin/mentors", mentorOnboardingRoutes);
+app.use("/api/mentor-onboarding", mentorOnboardingRoutes); 
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));

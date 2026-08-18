@@ -26,16 +26,27 @@ router.get('/dashboard', mentorController.getMentorDashboard);
 router.get('/summary/:mentorId', mentorController.getMentorDashboard);
 router.get('/summary', mentorController.getMentorDashboard);
 
-// ── Assigned Groups ──────────────────────────────────────────────────────────
-// GET /api/mentor/groups/:mentorId or GET /api/mentor/groups?mentorId=...
-router.get('/groups/:mentorId', mentorController.getMentorGroups);
-router.get('/groups', mentorController.getMentorGroups);
+// ── Specific Nested Routes (Placed BEFORE generic :mentorId routes) ───────────
+router.get('/groups/:groupId/tasks', mentorController.getMentorGroupTasks);
 router.get('/group/:groupId', mentorController.getMentorGroupDetails);
+router.get('/assigned-group/:mentorId/:level', mentorController.getMentorGroups);
+router.get('/assigned-group/:mentorId', mentorController.getMentorGroups);
+router.get('/assigned/:mentorId', mentorController.getMentorGroups);
+
+// ── Generic Groups Routes ─────────────────────────────────────────────────────
+router.get('/groups', mentorController.getMentorGroups);
+router.get('/groups/:mentorId', mentorController.getMentorGroups);
 
 // ── Stage Guidelines ──────────────────────────────────────────────────────────
 // GET /api/mentor/stages/:level?user_role=mentor
 // Blocks Level 1 for mentors (returns 403).
 router.get('/stages/:level', mentorController.getMentorStages);
+
+// -- Student Submissions for Mentor Level Pages --
+router.get('/submissions/:level', mentorController.getMentorSubmissions);
+
+// -- Calendar Events (Student Tasks, Milestones, Stage Deadlines) --
+router.get('/calendar-events', mentorController.getMentorCalendarEvents);
 
 // ── Announcements ─────────────────────────────────────────────────────────────
 // GET /api/mentor/announcements
@@ -45,5 +56,10 @@ router.get('/announcements', mentorController.getMentorAnnouncements);
 // GET /api/mentor/announcements/:id
 // Returns a single announcement — blocks if it is Level 1 targeted.
 router.get('/announcements/:id', mentorController.getMentorAnnouncementById);
+
+// -- Mentor Task Feedback (Database-backed feedback for student tasks) --
+router.put('/tasks/:taskId/feedback', mentorController.saveMentorTaskFeedback);
+router.post('/tasks/:taskId/feedback', mentorController.saveMentorTaskFeedback);
+router.delete('/tasks/:taskId/feedback', mentorController.clearMentorTaskFeedback);
 
 module.exports = router;

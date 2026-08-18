@@ -31,7 +31,7 @@ const getCoordinatorSubmissionTracking = async (req, res) => {
       ORDER BY ss.submitted_at DESC
     `;
 
-    const [rows] = await db.execute(query, [level, level]);
+    const [rows] = await db.promise().execute(query, [level, level]);
 
     const normalized = (rows || []).map((row) => ({
       ...row,
@@ -71,7 +71,7 @@ const getStageMarks = async (req, res) => {
             WHERE m.mark_type = 'stage'
             ORDER BY m.created_at DESC
         `;
-        const [rows] = await db.execute(query);
+        const [rows] = await db.promise().execute(query);
         res.json(rows);
     } catch (error) {
         console.error("Error fetching marks:", error);
@@ -87,7 +87,7 @@ const submitMarks = async (req, res) => {
             INSERT INTO marks (group_id, stage_id, marked_by, marks_obtained, feedback, mark_type) 
             VALUES (?, ?, ?, ?, ?, 'stage')
         `;
-        await db.execute(sql, [group_id, stage_id, marked_by, marks_obtained, feedback]);
+        await db.promise().execute(sql, [group_id, stage_id, marked_by, marks_obtained, feedback]);
         res.status(201).json({ message: 'Mark submitted successfully!' });
     } catch (error) {
         console.error("Error submitting mark:", error);
