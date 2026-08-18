@@ -250,6 +250,8 @@ app.get("/api/admin/stats", (req, res) => {
     `SELECT 
       (SELECT COUNT(*) FROM users) as totalUsers,
       (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
+      (SELECT COUNT(*) FROM users WHERE role = 'coordinator' OR designation = 'coordinator') as totalCoordinators,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR designation = 'supervisor' OR (role = 'lecturer' AND (designation IS NULL OR designation != 'coordinator'))) as totalSupervisors,
       (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
       (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
     (err, results) => {
@@ -328,6 +330,9 @@ app.use("/api/dashboard", dashboardRoutes);
 
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
+
+const evaluationPanelRoutes = require("./src/routes/evaluationPanelRoutes");
+app.use("/api/evaluation-panels", evaluationPanelRoutes);
 
 // Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");

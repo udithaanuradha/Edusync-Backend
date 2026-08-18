@@ -4,13 +4,15 @@ const {
   getStageMarks,
   submitMarks,
   getCoordinatorSubmissionTracking,
+  getLevelMarksSummary,
 } = require('../controllers/marksController');
 
-// GET request for fetching the Gradebook data
+// Gradebook and level marks
 router.get('/stage-marks', getStageMarks);
 router.get('/level/:level', getCoordinatorSubmissionTracking);
+router.get('/summary/level/:level', getLevelMarksSummary);
 
-// POST request for supervisors to submit new marks
+// Submit marks
 router.post('/submit', submitMarks);
 
 module.exports = router;
