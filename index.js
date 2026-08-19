@@ -72,7 +72,6 @@ app.post("/api/login", (req, res) => {
         return res.status(403).json({ error: "Please verify your email before logging in" });
       }
       delete user.is_verified;
-
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
         [user.id],
@@ -343,6 +342,7 @@ app.use("/api/mentor", mentorRoutes);
 
 const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
 app.use("/api/admin/mentors", mentorOnboardingRoutes);
+app.use("/api/mentor-onboarding", mentorOnboardingRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
