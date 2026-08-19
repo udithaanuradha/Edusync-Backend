@@ -6,16 +6,21 @@ const getStagesByLevel = (level, coordinatorId, callback) => {
         coordinatorId = null;
     }
     // First get all stages for this level created by this coordinator
-    let query = 'SELECT * FROM project_stages WHERE level = ?';
+    let query = `
+        SELECT ps.*, u.name AS creator_name, u.academic_unit, u.role AS creator_role, u.designation AS creator_designation
+        FROM project_stages ps
+        LEFT JOIN users u ON ps.created_by = u.id
+        WHERE ps.level = ?
+    `;
     let params = [level];
     
     // If coordinatorId is provided, filter by created_by
     if (coordinatorId) {
-        query += ' AND created_by = ?';
+        query += ' AND ps.created_by = ?';
         params.push(coordinatorId);
     }
     
-    query += ' ORDER BY stage_id';
+    query += ' ORDER BY ps.stage_id';
     
     db.query(query, params, (err, stages) => {
         if (err) return callback(err, null);
@@ -24,7 +29,14 @@ const getStagesByLevel = (level, coordinatorId, callback) => {
         if (stages.length === 0) return callback(null, []);
         
         const stageIds = stages.map(s => s.stage_id);
-        db.query('SELECT * FROM stage_files WHERE stage_id IN (?) ORDER BY uploaded_at DESC', [stageIds], (err, files) => {
+        const fileQuery = `
+            SELECT sf.*, u.name AS uploader_name, u.academic_unit, u.role AS uploader_role, u.designation AS uploader_designation
+            FROM stage_files sf
+            LEFT JOIN users u ON sf.uploaded_by = u.id
+            WHERE sf.stage_id IN (?)
+            ORDER BY sf.uploaded_at DESC
+        `;
+        db.query(fileQuery, [stageIds], (err, files) => {
             if (err) {
                 if (err.code === 'ER_NO_SUCH_TABLE') {
                     const stagesWithFiles = stages.map(stage => ({
