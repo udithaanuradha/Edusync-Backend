@@ -113,50 +113,57 @@ const getAnnouncements = (req, res) => {
       return res.status(500).json({ error: 'Database setup failed' });
     }
 
-    let query = `SELECT * FROM announcements`;
+    let whereConditions = [];
     let params = [];
 
     // 1. Fetch all announcements for management page (all_audience=true)
     if (allAudienceOnly) {
-      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+      // no filter
     }
     // 2. Fetch announcements by author name
     else if (authorName) {
-      query = `SELECT * FROM announcements WHERE author_name = ? ORDER BY created_at DESC`;
+      whereConditions.push('author_name = ?');
       params.push(authorName);
     }
     // 3. SUPER ADMIN: Sees absolutely every announcement
     else if (userRole && userRole.toLowerCase() === 'admin') {
-      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+      // admin sees all
     }
     // 4. COORDINATOR: Uses "Rule of Relevance"
     else if (userRole && userRole.toLowerCase() === 'coordinator') {
-      query = `SELECT * FROM announcements WHERE (LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?) ORDER BY created_at DESC`;
+      whereConditions.push(`(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?)`);
       params.push('%coordinator%');
     }
     // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
     else if (userRole) {
       const normalizedRole = normalizeAudience(userRole);
-      query = `SELECT * FROM announcements WHERE (LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
+      let roleCondition = `(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
       params.push(`%${normalizedRole}%`);
 
       if (userLevel) {
-        query += ` OR LOWER(target_audience) LIKE ?`;
+        roleCondition += ` OR LOWER(target_audience) LIKE ?`;
         params.push(`%level${userLevel}%`);
       }
       
-      query += `) ORDER BY created_at DESC`;
+      roleCondition += `)`;
+      whereConditions.push(roleCondition);
     }
     // 6. Fallback: No valid parameters provided
     else {
-      query = `SELECT * FROM announcements WHERE LOWER(target_audience) IN ('all', 'all system users') ORDER BY created_at DESC`;
+      whereConditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
     }
 
     // Exclude current user's own posts from dashboard view
     if (currentUserId && currentUserId > 0 && !allAudienceOnly && !authorName) {
-      query = query.replace(' ORDER BY created_at DESC', ` AND (author_id IS NULL OR author_id != ?) ORDER BY created_at DESC`);
+      whereConditions.push(`(author_id IS NULL OR author_id != ?)`);
       params.push(currentUserId);
     }
+
+    let query = `SELECT * FROM announcements`;
+    if (whereConditions.length > 0) {
+      query += ` WHERE ` + whereConditions.join(' AND ');
+    }
+    query += ` ORDER BY created_at DESC`;
 
     console.log('[getAnnouncements] Query:', query, 'Params:', params);
 
