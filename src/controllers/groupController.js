@@ -705,7 +705,7 @@ const getGroupMembers = async (req, res) => {
       }
     }
 
-    
+
 //Fetch all member details for the target group
     const [members] = await dbPromise.query(
       `SELECT gm.group_id AS group_id, u.id AS id, u.name AS name, gm.is_leader AS is_leader
@@ -716,7 +716,27 @@ const getGroupMembers = async (req, res) => {
       [groupId]
     );
 
-    res.status(200).json({ success: true, data: members });
+    // Also resolve the group's assigned supervisor (project_groups.supervisor_id)
+    // and industry mentor (project_groups.mentor_id) so the frontend can show
+    // them alongside student members without a second round trip.
+    const [groupRows] = await dbPromise.query(
+      `SELECT pg.supervisor_id, su.name AS supervisor_name, pg.mentor_id, mu.name AS mentor_name
+       FROM project_groups pg
+       LEFT JOIN users su ON su.id = pg.supervisor_id
+       LEFT JOIN users mu ON mu.id = pg.mentor_id
+       WHERE pg.id = ?
+       LIMIT 1`,
+      [groupId]
+    );
+    const groupRow = groupRows[0] || {};
+    const supervisor = groupRow.supervisor_id
+      ? { id: groupRow.supervisor_id, name: groupRow.supervisor_name || 'Unknown Supervisor' }
+      : null;
+    const mentor = groupRow.mentor_id
+      ? { id: groupRow.mentor_id, name: groupRow.mentor_name || 'Unknown Mentor' }
+      : null;
+
+    res.status(200).json({ success: true, data: members, supervisor, mentor });
   } catch (error) {
     console.error('❌ Error fetching group members:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch group members.' });
