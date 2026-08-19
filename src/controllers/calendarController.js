@@ -52,6 +52,27 @@ const getUpcomingPanels = async (req, res) => {
     }
 };
 
+const deleteEvaluationPanel = async (req, res) => {
+    const panelId = Number(req.params.id);
+
+    if (!panelId || Number.isNaN(panelId)) {
+        return res.status(400).json({ error: 'A valid panel id is required.' });
+    }
+
+    try {
+        const [result] = await db.promise().query('DELETE FROM evaluation_panels WHERE id = ?', [panelId]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Panel not found.' });
+        }
+
+        return res.status(200).json({ message: 'Evaluation panel deleted successfully.' });
+    } catch (error) {
+        console.error('Database error (deleteEvaluationPanel):', error);
+        return res.status(500).json({ error: 'Failed to delete panel.' });
+    }
+};
+
 /**
  * Freeze a single date (e.g., exam period, holiday) so it can be displayed
  * or used to prevent scheduling on that day.
@@ -90,6 +111,7 @@ const getFrozenDates = async (req, res) => {
 module.exports = {
     scheduleEvaluationPanel,
     getUpcomingPanels,
+    deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
 };

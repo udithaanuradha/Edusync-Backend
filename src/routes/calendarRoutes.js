@@ -3,6 +3,7 @@ const router = express.Router();
 const {
     scheduleEvaluationPanel,
     getUpcomingPanels,
+    deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
 } = require('../controllers/calendarController');
@@ -16,6 +17,11 @@ router.post('/panels', scheduleEvaluationPanel);
 // 2. FETCH UPCOMING PANELS (For the right sidebar)
 // ---------------------------------------------------------
 router.get('/panels', getUpcomingPanels);
+
+// ---------------------------------------------------------
+// 2.1 DELETE A PANEL
+// ---------------------------------------------------------
+router.delete('/panels/:id', deleteEvaluationPanel);
 
 // ---------------------------------------------------------
 // 3. FREEZE A DATE (From the top right button)

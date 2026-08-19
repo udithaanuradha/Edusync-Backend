@@ -126,14 +126,14 @@ const getCoordinatorSummary = async (req, res) => {
     const upcomingDeadlinesQuery = `
       SELECT
         ps.stage_id AS id,
-        COALESCE(ps.deadline, CURDATE()) AS date,
+        ps.deadline AS date,
         ps.stage_name AS title,
-        NULL AS academicLevel,
-        NULL AS startTime,
-        NULL AS targetGroup,
+        ps.level AS academicLevel,
+        TIME(ps.deadline) AS startTime,
+        CONCAT('Level ', ps.level) AS targetGroup,
         NULL AS location
       FROM project_stages ps
-      ${supportsCoordinatorTracking && hasCoordinatorFilter ? 'WHERE created_by = ? AND ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()' : 'WHERE ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
+      ${supportsCoordinatorTracking && hasCoordinatorFilter ? 'WHERE ps.created_by = ? AND ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()' : 'WHERE ps.deadline IS NOT NULL AND ps.deadline >= CURDATE()'}
       ORDER BY ps.deadline ASC, ps.stage_id ASC
       LIMIT 3
     `;
