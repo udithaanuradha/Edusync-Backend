@@ -2,6 +2,21 @@ const db = require('../config/db');
 const dbPromise = db.promise();
 
 let ensureTablesPromise = null;
+let ensureFeedbackSeenColumnPromise = null;
+
+// Adds milestones.feedback_seen_at (nullable timestamp) if it isn't there yet.
+// NULL means "not yet seen by the student"; set to NOW() once the student
+// views it. updateMilestoneStatus resets it to NULL whenever a
+// supervisor/coordinator/admin sets or changes feedback, so it counts as
+// unseen again.
+const ensureFeedbackSeenColumn = async () => {
+  if (!ensureFeedbackSeenColumnPromise) {
+    ensureFeedbackSeenColumnPromise = dbPromise.query(
+      `ALTER TABLE milestones ADD COLUMN IF NOT EXISTS feedback_seen_at TIMESTAMP NULL DEFAULT NULL`
+    );
+  }
+  await ensureFeedbackSeenColumnPromise;
+};
 
 const ensureMilestoneTables = async () => {
   if (!ensureTablesPromise) {
@@ -130,6 +145,7 @@ const createMilestone = async (req, res) => {
 const getMilestonesByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureFeedbackSeenColumn();
     const { groupId } = req.params;
     const userId = req.headers['x-user-id'];
     const userRole = req.headers['x-user-role'];
@@ -145,9 +161,9 @@ const getMilestonesByGroup = async (req, res) => {
     console.log(`📡 [Backend] Fetching Milestones for Group ID: ${groupId}`);
 
     const [milestones] = await dbPromise.query(
-      `SELECT id AS id, group_id AS group_id, title AS title, description AS description, 
-              start_date AS start_date, due_date AS due_date, status AS status, 
-              feedback_reason AS feedback_reason, created_at AS created_at
+      `SELECT id AS id, group_id AS group_id, title AS title, description AS description,
+              start_date AS start_date, due_date AS due_date, status AS status,
+              feedback_reason AS feedback_reason, feedback_seen_at AS feedback_seen_at, created_at AS created_at
        FROM milestones WHERE group_id = ? ORDER BY created_at ASC`,
       [groupId]
     );
@@ -162,10 +178,81 @@ const getMilestonesByGroup = async (req, res) => {
 
 
 
+/**
+ * GET: Count of "unseen" supervisor feedback items across every group the
+ * student belongs to. Backs the red notification badge in Header.tsx.
+ * A milestone counts as unseen feedback when it has a non-empty
+ * feedback_reason and feedback_seen_at is still NULL.
+ */
+const getUnseenFeedbackCount = async (req, res) => {
+  try {
+    await ensureMilestoneTables();
+    await ensureFeedbackSeenColumn();
+    const { studentId } = req.params;
+    const authUserId = req.headers['x-user-id'];
+
+    // A student may only ever check their own unseen-feedback count.
+    if (authUserId && String(authUserId) !== String(studentId)) {
+      return res.status(403).json({ success: false, error: 'Access denied. You can only check your own notifications.' });
+    }
+
+    const [rows] = await dbPromise.query(
+      `SELECT COUNT(*) AS cnt
+       FROM milestones m
+       JOIN project_group_members gm ON gm.group_id = m.group_id
+       WHERE gm.student_id = ?
+         AND m.feedback_reason IS NOT NULL
+         AND m.feedback_reason <> ''
+         AND m.feedback_seen_at IS NULL`,
+      [studentId]
+    );
+
+    res.status(200).json({ success: true, count: Number(rows[0]?.cnt || 0) });
+  } catch (error) {
+    console.error('❌ Error fetching unseen feedback count:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch unseen feedback count.' });
+  }
+};
+
+/**
+ * PUT: Marks every currently-unseen feedback item for one group as seen.
+ * Called once the student has actually viewed the feedback section on
+ * ProjectManagementPage so the red badge in the header clears.
+ */
+const markGroupFeedbackSeen = async (req, res) => {
+  try {
+    await ensureMilestoneTables();
+    await ensureFeedbackSeenColumn();
+    const { groupId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    if (userId && userRole) {
+      const isMember = await verifyMembership(userId, userRole, groupId);
+      if (!isMember) {
+        return res.status(403).json({ success: false, error: 'Access denied. You are not a member of this group.' });
+      }
+    }
+
+    await dbPromise.query(
+      `UPDATE milestones
+       SET feedback_seen_at = NOW()
+       WHERE group_id = ? AND feedback_reason IS NOT NULL AND feedback_reason <> '' AND feedback_seen_at IS NULL`,
+      [groupId]
+    );
+
+    res.status(200).json({ success: true, message: 'Feedback marked as seen.' });
+  } catch (error) {
+    console.error('❌ Error marking feedback as seen:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark feedback as seen.' });
+  }
+};
+
 //Supervisor approves or rejects a milestone with feedback reason. Only Supervisors, Coordinators, or Admins can perform this action.
 const updateMilestoneStatus = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureFeedbackSeenColumn();
     const { id } = req.params;
     const { status, feedback_reason } = req.body;
     const userRole = req.headers['x-user-role'];
@@ -175,8 +262,11 @@ const updateMilestoneStatus = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Access denied. Students cannot approve/reject milestones.' });
     }
 
+    // feedback_seen_at resets to NULL so a new/changed feedback reason shows
+    // up again as "unseen" for the student, even if they'd already seen a
+    // previous round of feedback on this same milestone.
     await dbPromise.query(
-      `UPDATE milestones SET status = ?, feedback_reason = ? WHERE id = ?`,
+      `UPDATE milestones SET status = ?, feedback_reason = ?, feedback_seen_at = NULL WHERE id = ?`,
       [status, feedback_reason || null, id]
     );
 
@@ -563,6 +653,8 @@ module.exports = {
   createMilestone,
   getMilestonesByGroup,
   updateMilestoneStatus,
+  getUnseenFeedbackCount,
+  markGroupFeedbackSeen,
   deleteMilestone,
   createStudentTask,
   getTasksByMilestone,

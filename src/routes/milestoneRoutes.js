@@ -4,6 +4,8 @@ const {
   createMilestone,
   getMilestonesByGroup,
   updateMilestoneStatus,
+  getUnseenFeedbackCount,
+  markGroupFeedbackSeen,
   deleteMilestone,
   createStudentTask,
   getTasksByMilestone,
@@ -34,6 +36,13 @@ router.get('/group/:groupId', getMilestonesByGroup);
 
 // Update milestone status (PENDING, REJECTED, APPROVED) and feedback
 router.put('/:id/status', updateMilestoneStatus);
+
+// Count of unseen supervisor feedback items across all of a student's groups
+// (backs the red notification badge in Header.tsx)
+router.get('/feedback/unseen-count/:studentId', getUnseenFeedbackCount);
+
+// Mark all of one group's currently-unseen feedback as seen
+router.put('/feedback/mark-seen/:groupId', markGroupFeedbackSeen);
 
 // Delete a milestone
 router.delete('/:id', deleteMilestone);

@@ -145,7 +145,13 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
       ps.level,
       u.name AS student_name,
       u.email AS student_email,
-      pg.group_name
+      pg.group_name,
+      CASE
+        WHEN ss.submitted_at IS NULL THEN 'Pending'
+        WHEN ps.deadline IS NULL THEN 'On Time'
+        WHEN ss.submitted_at > ps.deadline THEN 'Late'
+        ELSE 'On Time'
+      END AS computed_status
     FROM student_submissions ss
     LEFT JOIN project_stages ps ON ps.stage_id = ss.stage_id
     LEFT JOIN users u ON u.id = ss.student_id
@@ -161,15 +167,41 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Unable to fetch submissions for this level.', error: err.message });
     }
 
-    const normalized = (results || []).map((row) => ({
-      ...row,
-      file_paths: typeof row.file_paths === 'string' ? JSON.parse(row.file_paths) : row.file_paths || [],
-      group_name: row.group_name || `${row.student_name || 'Student'} Submission`,
-      evaluator_name: 'Not assigned',
-      submitted_at: row.submitted_at,
-      status: row.status || 'submitted',
-      current_status: row.status || 'submitted',
-    }));
+    const seen = new Set();
+    const normalized = (results || [])
+      .map((row) => {
+        let parsedFilePaths = [];
+
+        try {
+          parsedFilePaths = Array.isArray(row.file_paths)
+            ? row.file_paths
+            : typeof row.file_paths === 'string'
+              ? JSON.parse(row.file_paths)
+              : [];
+        } catch {
+          parsedFilePaths = [];
+        }
+
+        const computedStatus = row.computed_status || row.status || 'On Time';
+        const dedupeKey = row.submission_id || `${row.student_id ?? 'student'}-${row.stage_id ?? 'stage'}-${row.submitted_at ?? Date.now()}`;
+
+        if (seen.has(dedupeKey)) {
+          return null;
+        }
+
+        seen.add(dedupeKey);
+
+        return {
+          ...row,
+          file_paths: Array.isArray(parsedFilePaths) ? parsedFilePaths : [],
+          group_name: row.group_name || `${row.student_name || 'Student'} Submission`,
+          evaluator_name: 'Not assigned',
+          submitted_at: row.submitted_at,
+          status: computedStatus,
+          current_status: computedStatus,
+        };
+      })
+      .filter(Boolean);
 
     return res.json({ success: true, data: normalized });
   });
