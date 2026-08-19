@@ -24,10 +24,10 @@ router.post('/preview-upload', (req, res) => {
       return res.status(500).json({ error: "Database error fetching active groups." });
     }
 
-    const verifiedMentors = mentors.map(m => {
-      const matchedGroup = groups.find(g => 
-        String(g.id) === String(m.groupNo) || 
-        g.group_name.toLowerCase().trim() === String(m.groupName).toLowerCase().trim()
+    const verifiedMentors = (mentors || []).map(m => {
+      const matchedGroup = (groups || []).find(g => 
+        (m.groupNo && String(g.id) === String(m.groupNo)) || 
+        (g.group_name && m.groupName && String(g.group_name).toLowerCase().trim() === String(m.groupName).toLowerCase().trim())
       );
 
       return {
@@ -135,7 +135,7 @@ router.post('/finalize-setup', (req, res) => {
 });
 
 // 4. DELETE MENTOR (CRUD OPERATION WITH AUTOMATIC UNASSIGNMENT)
-router.delete('/mentors/:id', (req, res) => {
+const deleteMentorHandler = (req, res) => {
   const mentorId = req.params.id;
 
   // Step A: Set mentor_id to NULL in project_groups so no orphan IDs remain
@@ -162,6 +162,9 @@ router.delete('/mentors/:id', (req, res) => {
       res.status(200).json({ success: true, message: "Mentor deleted and group assignment cleared successfully." });
     });
   });
-});
+};
+
+router.delete('/mentors/:id', deleteMentorHandler);
+router.delete('/:id', deleteMentorHandler);
 
 module.exports = router;

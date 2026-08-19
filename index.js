@@ -298,6 +298,9 @@ app.use("/api/projects", projectRoutes);
 const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
+const mentorGroupRoutes = require("./src/routes/mentorGroupRoutes");
+app.use("/api/groups", mentorGroupRoutes);
+
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
@@ -338,7 +341,7 @@ const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
 
 const mentorRoutes = require("./src/routes/mentorRoutes");
-app.use("/api/mentor", mentorRoutes);
+app.use("/api/mentor", mentorRoutes); 
 
 const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
 app.use("/api/admin/mentors", mentorOnboardingRoutes);

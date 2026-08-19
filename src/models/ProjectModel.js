@@ -1,6 +1,10 @@
 const db = require('../config/db');
 
 const getStagesByLevel = (level, coordinatorId, callback) => {
+    if (typeof coordinatorId === 'function') {
+        callback = coordinatorId;
+        coordinatorId = null;
+    }
     // First get all stages for this level created by this coordinator
     let query = `
         SELECT ps.*, u.name AS creator_name, u.academic_unit, u.role AS creator_role, u.designation AS creator_designation

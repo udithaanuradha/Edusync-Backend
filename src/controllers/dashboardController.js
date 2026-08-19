@@ -19,7 +19,7 @@ const getCoordinatorSummary = async (req, res) => {
   try {
     // Extract coordinatorId from query parameters
     const coordinatorId = req.query.coordinatorId;
-    
+
     // Build WHERE clause for filtering by coordinator (if coordinatorId is provided)
     const hasCoordinatorFilter = !!coordinatorId;
     const supportsCoordinatorTracking = hasCoordinatorFilter ? await projectGroupsHasCreatedBy() : false;
@@ -231,7 +231,7 @@ const getStudentSummary = async (req, res) => {
         END AS progress,
         COALESCE(progress.last_activity, pg.created_at) AS updatedAt
       FROM project_groups pg
-      JOIN group_members gm ON pg.id = gm.group_id
+      JOIN project_group_members gm ON pg.id = gm.group_id
       LEFT JOIN users u ON u.id = pg.supervisor_id
       LEFT JOIN (
         SELECT
@@ -242,7 +242,7 @@ const getStudentSummary = async (req, res) => {
         WHERE mark_type = 'stage'
         GROUP BY group_id
       ) progress ON progress.group_id = pg.id
-      WHERE gm.student_id = ? AND gm.status = 'approved'
+      WHERE gm.student_id = ?
       ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
       LIMIT 4
     `;
@@ -329,7 +329,14 @@ const getStudentSummary = async (req, res) => {
   }
 };
 
+const { getMentorDashboard } = require('./mentorController');
+
+const getMentorSummary = async (req, res) => {
+  return getMentorDashboard(req, res);
+};
+
 module.exports = {
   getCoordinatorSummary,
   getStudentSummary,
+  getMentorSummary,
 };
