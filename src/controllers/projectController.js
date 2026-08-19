@@ -125,11 +125,10 @@ const uploadStageFile = async (req, res) => {
         return res.status(400).json({ success: false, error: 'stage_id is required' });
     }
 
-    if (!req.file.buffer) {
-        console.error('❌ No file buffer returned by multer.', req.file);
-        return res.status(500).json({ success: false, error: 'Upload failed before file buffer was available' });
-    }
 
+    // File info from Cloudinary
+    const fileName = req.file.originalname;
+    const fileUrl = req.file.path; // Cloudinary URL (e.g., https://res.cloudinary.com/...)
     const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
 
     try {
