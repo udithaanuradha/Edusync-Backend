@@ -50,8 +50,20 @@ router.get('/calendar-events', mentorController.getMentorCalendarEvents);
 
 // ── Announcements ─────────────────────────────────────────────────────────────
 // GET /api/mentor/announcements
-// Returns all announcements EXCEPT Level 1 targeted ones.
+// Returns all announcements scoped to mentor's assigned level and mentor-targeted announcements
 router.get('/announcements', mentorController.getMentorAnnouncements);
+
+// POST /api/mentor/announcements
+// Post an announcement targeted to mentor's assigned project group students
+router.post('/announcements', mentorController.createMentorAnnouncement);
+
+// PUT /api/mentor/announcements/:id
+// Edit an announcement authored by this mentor
+router.put('/announcements/:id', mentorController.updateMentorAnnouncement);
+
+// DELETE /api/mentor/announcements/:id
+// Delete an announcement authored by this mentor
+router.delete('/announcements/:id', mentorController.deleteMentorAnnouncement);
 
 // GET /api/mentor/announcements/:id
 // Returns a single announcement — blocks if it is Level 1 targeted.
