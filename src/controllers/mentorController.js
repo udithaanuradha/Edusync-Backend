@@ -1,6 +1,24 @@
 const db = require('../config/db');
 const Project = require('../models/projectModel');
 
+// Helper to retry transient DB connection timeouts (e.g. TiDB Cloud cold starts or network latency)
+const queryWithRetry = async (sql, params = [], retries = 2) => {
+  const dbPromise = db.promise();
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await dbPromise.query(sql, params);
+    } catch (err) {
+      const isTransient = err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || err.code === 'PROTOCOL_CONNECTION_LOST';
+      if (isTransient && i < retries) {
+        console.warn(`[mentorController] DB query transient error (${err.code}). Retrying attempt ${i + 2}/${retries + 1}...`);
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw err;
+    }
+  }
+};
+
 // ── Constant ─────────────────────────────────────────────────────────────────
 const LEVEL1_AUDIENCES = ['Level1', 'Level 1', 'Level1 Students', 'Level 1 Students'];
 
@@ -21,15 +39,13 @@ exports.getMentorStages = async (req, res) => {
   }
 
   try {
-    const dbPromise = db.promise();
-
     // 1. Find assigned group for this mentor at this level
     let assignedGroup = null;
     if (groupId) {
-      const [groups] = await dbPromise.query('SELECT * FROM project_groups WHERE id = ?', [groupId]);
+      const [groups] = await queryWithRetry('SELECT * FROM project_groups WHERE id = ?', [groupId]);
       if (groups.length > 0) assignedGroup = groups[0];
     } else if (mentorId) {
-      const [groups] = await dbPromise.query(
+      const [groups] = await queryWithRetry(
         'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
         [mentorId, level]
       );
@@ -71,7 +87,7 @@ exports.getMentorStages = async (req, res) => {
 
     stageQuery += ` ORDER BY ps.stage_id ASC`;
 
-    const [stages] = await dbPromise.query(stageQuery, queryParams);
+    const [stages] = await queryWithRetry(stageQuery, queryParams);
 
     if (stages.length === 0) {
       return res.json({ success: true, data: [] });
@@ -79,7 +95,7 @@ exports.getMentorStages = async (req, res) => {
 
     // 4. Attach stage files
     const stageIds = stages.map((s) => s.stage_id);
-    const [files] = await dbPromise.query(
+    const [files] = await queryWithRetry(
       'SELECT * FROM stage_files WHERE stage_id IN (?) ORDER BY uploaded_at DESC',
       [stageIds]
     );
@@ -104,7 +120,7 @@ exports.filterLevel1FromMentorAnnouncements = (announcements) => {
 };
 
 // ── 3. Standalone mentor announcements endpoint ──────────────────────────────
-exports.getMentorAnnouncements = (req, res) => {
+exports.getMentorAnnouncements = async (req, res) => {
   const query = `
     SELECT a.*, u.name AS author_name
     FROM announcements a
@@ -114,13 +130,15 @@ exports.getMentorAnnouncements = (req, res) => {
     ORDER BY a.created_at DESC
   `;
 
-  db.query(query, LEVEL1_AUDIENCES, (err, results) => {
-    if (err) return res.status(500).json({ success: false, error: err.message });
+  try {
+    const [results] = await queryWithRetry(query, LEVEL1_AUDIENCES);
     res.json({ success: true, data: results });
-  });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 };
 
-exports.getMentorAnnouncementById = (req, res) => {
+exports.getMentorAnnouncementById = async (req, res) => {
   const { id } = req.params;
   const query = `
     SELECT a.*, u.name AS author_name
@@ -129,8 +147,8 @@ exports.getMentorAnnouncementById = (req, res) => {
     WHERE a.id = ?
   `;
 
-  db.query(query, [id], (err, results) => {
-    if (err) return res.status(500).json({ success: false, error: err.message });
+  try {
+    const [results] = await queryWithRetry(query, [id]);
     if (results.length === 0) {
       return res.status(404).json({ success: false, message: 'Announcement not found.' });
     }
@@ -142,7 +160,9 @@ exports.getMentorAnnouncementById = (req, res) => {
       });
     }
     res.json({ success: true, data: announcement });
-  });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 };
 
 // ── 4. Mentor Groups ─────────────────────────────────────────────────────────
@@ -161,7 +181,6 @@ exports.getMentorGroups = async (req, res) => {
   }
 
   try {
-    const dbPromise = db.promise();
     let query = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
               sup.id AS supervisorId, sup.name AS supervisorName, sup.email AS supervisorEmail
        FROM project_groups pg
@@ -176,14 +195,14 @@ exports.getMentorGroups = async (req, res) => {
 
     query += ' ORDER BY pg.level ASC, pg.id ASC';
 
-    const [groups] = await dbPromise.query(query, queryParams);
+    const [groups] = await queryWithRetry(query, queryParams);
 
     if (groups.length === 0) {
       return res.json({ success: true, data: [] });
     }
 
     const groupIds = groups.map((g) => g.groupId);
-    const [members] = await dbPromise.query(
+    const [members] = await queryWithRetry(
       `SELECT pgm.group_id AS groupId, u.id, u.name, u.email, u.university_id AS universityId, pgm.is_leader AS isLeader
        FROM project_group_members pgm
        JOIN users u ON u.id = pgm.student_id
@@ -224,8 +243,7 @@ exports.getMentorGroups = async (req, res) => {
 exports.getMentorGroupDetails = async (req, res) => {
   const { groupId } = req.params;
   try {
-    const dbPromise = db.promise();
-    const [groups] = await dbPromise.query(
+    const [groups] = await queryWithRetry(
       `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
               sup.id AS supervisorId, sup.name AS supervisorName, sup.email AS supervisorEmail
        FROM project_groups pg
@@ -239,7 +257,7 @@ exports.getMentorGroupDetails = async (req, res) => {
     }
 
     const g = groups[0];
-    const [members] = await dbPromise.query(
+    const [members] = await queryWithRetry(
       `SELECT pgm.group_id AS groupId, u.id, u.name, u.email, u.university_id AS universityId, pgm.is_leader AS isLeader
        FROM project_group_members pgm
        JOIN users u ON u.id = pgm.student_id
@@ -285,8 +303,7 @@ exports.getMentorDashboard = (req, res) => {
 exports.getMentorStats = async (req, res) => {
   const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
-    const dbPromise = db.promise();
-    const [groups] = await dbPromise.query('SELECT COUNT(*) as count FROM project_groups WHERE mentor_id = ? AND level > 1', [mentorId]);
+    const [groups] = await queryWithRetry('SELECT COUNT(*) as count FROM project_groups WHERE mentor_id = ? AND level > 1', [mentorId]);
     res.json({ success: true, data: { assignedGroupsCount: groups[0]?.count || 0 } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -296,8 +313,7 @@ exports.getMentorStats = async (req, res) => {
 exports.getMentorProjects = async (req, res) => {
   const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
-    const dbPromise = db.promise();
-    const [groups] = await dbPromise.query(
+    const [groups] = await queryWithRetry(
       'SELECT id, group_name as name, department, level, created_at FROM project_groups WHERE mentor_id = ? AND level > 1',
       [mentorId]
     );
@@ -319,8 +335,7 @@ exports.getMentorNotifications = async (req, res) => {
 exports.getMentorGroupTasks = async (req, res) => {
   const { groupId } = req.params;
   try {
-    const dbPromise = db.promise();
-    const [tasks] = await dbPromise.query(
+    const [tasks] = await queryWithRetry(
       `SELECT st.*, u.name AS assigned_to_name, u.email AS assigned_to_email,
               u.university_id, m.title AS milestone_title, m.group_id
        FROM student_tasks st
@@ -342,8 +357,7 @@ exports.saveMentorTaskFeedback = async (req, res) => {
   const { feedback, mentor_feedback } = req.body;
   const fbText = mentor_feedback || feedback || '';
   try {
-    const dbPromise = db.promise();
-    await dbPromise.query(
+    await queryWithRetry(
       'UPDATE student_tasks SET mentor_feedback = ? WHERE id = ?',
       [fbText, taskId]
     );
@@ -357,8 +371,7 @@ exports.saveMentorTaskFeedback = async (req, res) => {
 exports.clearMentorTaskFeedback = async (req, res) => {
   const { taskId } = req.params;
   try {
-    const dbPromise = db.promise();
-    await dbPromise.query(
+    await queryWithRetry(
       'UPDATE student_tasks SET mentor_feedback = NULL WHERE id = ?',
       [taskId]
     );
@@ -385,15 +398,13 @@ exports.getMentorSubmissions = async (req, res) => {
   }
 
   try {
-    const dbPromise = db.promise();
-
     // 1. Find assigned group for this mentor at this level
     let assignedGroup = null;
     if (groupId) {
-      const [groups] = await dbPromise.query('SELECT * FROM project_groups WHERE id = ?', [groupId]);
+      const [groups] = await queryWithRetry('SELECT * FROM project_groups WHERE id = ?', [groupId]);
       if (groups.length > 0) assignedGroup = groups[0];
     } else if (mentorId) {
-      const [groups] = await dbPromise.query(
+      const [groups] = await queryWithRetry(
         'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
         [mentorId, level]
       );
@@ -405,7 +416,7 @@ exports.getMentorSubmissions = async (req, res) => {
     }
 
     // 2. Query student submissions for this group
-    const [submissions] = await dbPromise.query(
+    const [submissions] = await queryWithRetry(
       `SELECT ss.submission_id, ss.stage_id, ss.student_id, ss.file_paths, ss.submitted_at, ss.status,
               ps.stage_name, ps.deadline, ps.level,
               u.name AS student_name, u.email AS student_email, u.university_id,
@@ -482,10 +493,8 @@ exports.getMentorCalendarEvents = async (req, res) => {
   }
 
   try {
-    const dbPromise = db.promise();
-
     // 1. Fetch assigned groups for this mentor
-    const [groups] = await dbPromise.query(
+    const [groups] = await queryWithRetry(
       `SELECT id, group_name, level, department, created_by
        FROM project_groups
        WHERE mentor_id = ? AND level > 1`,
@@ -509,7 +518,7 @@ exports.getMentorCalendarEvents = async (req, res) => {
     const coordinatorIds = Array.from(new Set(groups.map((g) => g.created_by).filter(Boolean)));
 
     // 2. Fetch student tasks with due dates
-    const [tasks] = await dbPromise.query(
+    const [tasks] = await queryWithRetry(
       `SELECT st.id, st.task_name, st.description, st.status, st.due_date, st.created_at, st.mentor_feedback,
               u.name AS assigned_to_name, u.university_id,
               m.title AS milestone_title, m.group_id,
@@ -524,7 +533,7 @@ exports.getMentorCalendarEvents = async (req, res) => {
     );
 
     // 3. Fetch project milestones with due dates
-    const [milestones] = await dbPromise.query(
+    const [milestones] = await queryWithRetry(
       `SELECT m.id, m.group_id, m.title, m.description, m.start_date, m.due_date, m.status,
               pg.group_name, pg.level
        FROM milestones m
@@ -537,7 +546,7 @@ exports.getMentorCalendarEvents = async (req, res) => {
     // 4. Fetch coordinator stages with deadlines (filtered to official group coordinators)
     let stages = [];
     if (levels.length > 0 && coordinatorIds.length > 0) {
-      const [stageRows] = await dbPromise.query(
+      const [stageRows] = await queryWithRetry(
         `SELECT ps.stage_id, ps.level, ps.stage_name, ps.description, ps.deadline, ps.created_by,
                 u.name AS coordinator_name
          FROM project_stages ps
