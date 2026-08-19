@@ -72,7 +72,6 @@ app.post("/api/login", (req, res) => {
         return res.status(403).json({ error: "Please verify your email before logging in" });
       }
       delete user.is_verified;
-
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
         [user.id],
@@ -250,6 +249,8 @@ app.get("/api/admin/stats", (req, res) => {
     `SELECT 
       (SELECT COUNT(*) FROM users) as totalUsers,
       (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
+      (SELECT COUNT(*) FROM users WHERE role = 'coordinator' OR designation = 'coordinator') as totalCoordinators,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR designation = 'supervisor' OR (role = 'lecturer' AND (designation IS NULL OR designation != 'coordinator'))) as totalSupervisors,
       (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
       (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
     (err, results) => {
@@ -297,6 +298,9 @@ app.use("/api/projects", projectRoutes);
 const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
+const mentorGroupRoutes = require("./src/routes/mentorGroupRoutes");
+app.use("/api/groups", mentorGroupRoutes);
+
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
@@ -329,15 +333,19 @@ app.use("/api/dashboard", dashboardRoutes);
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
 
+const evaluationPanelRoutes = require("./src/routes/evaluationPanelRoutes");
+app.use("/api/evaluation-panels", evaluationPanelRoutes);
+
 // Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
 
 const mentorRoutes = require("./src/routes/mentorRoutes");
-app.use("/api/mentor", mentorRoutes);
+app.use("/api/mentor", mentorRoutes); 
 
 const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
 app.use("/api/admin/mentors", mentorOnboardingRoutes);
+app.use("/api/mentor-onboarding", mentorOnboardingRoutes);
 
 // --- 7. Server Initialization ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
