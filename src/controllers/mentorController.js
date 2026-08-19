@@ -114,34 +114,238 @@ exports.getMentorStages = async (req, res) => {
 
 // ── 2. JS helper — filter Level 1 announcements out of a list ────────────────
 exports.filterLevel1FromMentorAnnouncements = (announcements) => {
-  return announcements.filter(
-    (a) => !LEVEL1_AUDIENCES.includes((a.target_audience || '').trim())
-  );
+  return announcements.filter((a) => {
+    const aud = String(a.target_audience || '').trim().toLowerCase();
+    return !aud.includes('level 1') && !aud.includes('level1');
+  });
+};
+
+// ── Department mapping helper ─────────────────────────────────────────────────
+const mapAllowedDepartments = (deptList) => {
+  const mapped = new Set(deptList.map((d) => String(d).toUpperCase().trim()));
+  if (mapped.has('ITM') || mapped.has('IDS')) {
+    mapped.add('ITM');
+    mapped.add('IDS');
+  }
+  if (mapped.has('AI') || mapped.has('CM')) {
+    mapped.add('AI');
+    mapped.add('CM');
+  }
+  if (mapped.has('IT')) {
+    mapped.add('IT');
+  }
+  return Array.from(mapped);
 };
 
 // ── 3. Standalone mentor announcements endpoint ──────────────────────────────
+// Strictly filters announcements by the mentor's assigned level(s) and group department(s).
 exports.getMentorAnnouncements = async (req, res) => {
-  const query = `
-    SELECT a.*, u.name AS author_name
-    FROM announcements a
-    LEFT JOIN users u ON a.author_id = u.id
-    WHERE a.target_audience NOT IN (?, ?, ?, ?)
-       OR a.target_audience IS NULL
-    ORDER BY a.created_at DESC
-  `;
+  const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'] || req.user?.id;
+  const levelFilter = req.query.level ? Number(req.query.level) : null;
+  const departmentFilter = req.query.department ? String(req.query.department).trim().toUpperCase() : null;
 
   try {
-    const [results] = await queryWithRetry(query, LEVEL1_AUDIENCES);
-    res.json({ success: true, data: results });
+    let assignedLevels = [];
+    let assignedDepts = [];
+    let coordinatorIds = [];
+    let supervisorIds = [];
+
+    if (mentorId) {
+      // 1. Fetch mentor profile
+      const [mentorRows] = await queryWithRetry(
+        'SELECT id, name, role, academic_unit, level FROM users WHERE id = ?',
+        [mentorId]
+      );
+      if (mentorRows.length > 0) {
+        const mUser = mentorRows[0];
+        if (mUser.level && Number(mUser.level) > 1) {
+          assignedLevels.push(Number(mUser.level));
+        }
+        if (mUser.academic_unit) {
+          assignedDepts.push(String(mUser.academic_unit).trim().toUpperCase());
+        }
+      }
+
+      // 2. Fetch assigned groups for this mentor
+      const [assignedGroups] = await queryWithRetry(
+        'SELECT id, group_name, level, department, created_by, supervisor_id FROM project_groups WHERE mentor_id = ? AND level > 1',
+        [mentorId]
+      );
+
+      for (const g of assignedGroups) {
+        if (g.level && Number(g.level) > 1 && !assignedLevels.includes(Number(g.level))) {
+          assignedLevels.push(Number(g.level));
+        }
+        if (g.department) {
+          const dept = String(g.department).trim().toUpperCase();
+          if (!assignedDepts.includes(dept)) assignedDepts.push(dept);
+        }
+        if (g.created_by && !coordinatorIds.includes(g.created_by)) {
+          coordinatorIds.push(g.created_by);
+        }
+        if (g.supervisor_id && !supervisorIds.includes(g.supervisor_id)) {
+          supervisorIds.push(g.supervisor_id);
+        }
+      }
+    }
+
+    if (levelFilter && !isNaN(levelFilter) && levelFilter > 1) {
+      assignedLevels = [levelFilter];
+    }
+    if (departmentFilter) {
+      assignedDepts = [departmentFilter];
+    }
+
+    const allowedUnits = mapAllowedDepartments(assignedDepts);
+
+    // 3. Query all announcements with author metadata
+    const query = `
+      SELECT a.id, a.title, a.message, a.message AS content, a.target_audience, a.created_at,
+             COALESCE(u.name, a.author_name) AS author_name,
+             a.author_id,
+             u.role AS author_role,
+             u.academic_unit AS author_academic_unit,
+             u.level AS author_level
+      FROM announcements a
+      LEFT JOIN users u ON a.author_id = u.id
+      ORDER BY a.created_at DESC
+    `;
+
+    const [rows] = await queryWithRetry(query);
+
+    // 4. Apply strict filtering
+    const filtered = rows.filter((a) => {
+      const aud = String(a.target_audience || '').trim().toLowerCase();
+      const authorRole = String(a.author_role || '').toLowerCase();
+      const authorDept = String(a.author_academic_unit || '').trim().toUpperCase();
+      const authorLevel = a.author_level ? Number(a.author_level) : null;
+      const authorId = a.author_id;
+
+      // 4a. STRICTLY EXCLUDE Level 1
+      if (
+        aud.includes('level 1') ||
+        aud.includes('level1') ||
+        aud === 'level 1 students' ||
+        aud === 'level 1 assigned students'
+      ) {
+        return false;
+      }
+
+      // 4b. Exclude specific other roles (Supervisors/Coordinators/Admins only) unless mentor or group supervisor
+      if (
+        (aud.includes('supervisor') && !aud.includes('all') && !aud.includes('mentor') && !supervisorIds.includes(authorId)) ||
+        (aud.includes('coordinator') && !aud.includes('all') && !aud.includes('mentor')) ||
+        (aud.includes('admin') && !aud.includes('all') && !aud.includes('mentor'))
+      ) {
+        if (aud.includes('assigned student') || aud.includes('assigned students')) {
+          return Boolean(authorId && supervisorIds.includes(authorId));
+        }
+        return false;
+      }
+
+      // 4c. Supervisor announcements for assigned students
+      if (aud.includes('assigned student') || aud.includes('assigned students')) {
+        return Boolean(authorId && supervisorIds.includes(authorId));
+      }
+
+      // 4d. ALWAYS INCLUDE General / System-wide announcements
+      if (
+        aud === 'all' ||
+        aud === 'all system users' ||
+        aud === 'all students and staff' ||
+        aud === 'all users' ||
+        aud === '' ||
+        aud === 'system'
+      ) {
+        return true;
+      }
+
+      // 4e. ALWAYS INCLUDE Mentor-targeted announcements
+      if (
+        aud.includes('mentor') ||
+        aud.includes('industry mentor') ||
+        aud.includes('mentors')
+      ) {
+        return true;
+      }
+
+      // 4f. Level check
+      const isLevel2Target = aud.includes('level 2') || aud.includes('level2');
+      const isLevel3Target = aud.includes('level 3') || aud.includes('level3');
+      const isLevel4Target = aud.includes('level 4') || aud.includes('level4');
+
+      if (isLevel2Target || isLevel3Target || isLevel4Target) {
+        if (assignedLevels.length > 0) {
+          const matchesLevel =
+            (isLevel2Target && assignedLevels.includes(2)) ||
+            (isLevel3Target && assignedLevels.includes(3)) ||
+            (isLevel4Target && assignedLevels.includes(4));
+
+          if (!matchesLevel) return false;
+        }
+
+        // Department/Coordinator scoping if author is a coordinator
+        if (assignedDepts.length > 0 && authorDept && allowedUnits.length > 0) {
+          if (!allowedUnits.includes(authorDept)) {
+            if (coordinatorIds.length > 0 && authorId && !coordinatorIds.includes(authorId)) {
+              return false;
+            }
+          }
+        }
+
+        return true;
+      }
+
+      // 4g. Group coordinator announcements
+      if (authorId && coordinatorIds.includes(authorId)) {
+        return true;
+      }
+
+      // 4h. Coordinator for mentor's level & department
+      if (authorRole === 'coordinator' || authorRole === 'lecturer') {
+        if (
+          authorDept &&
+          allowedUnits.includes(authorDept) &&
+          (!authorLevel || assignedLevels.includes(authorLevel))
+        ) {
+          return true;
+        }
+      }
+
+      // If mentor has no assigned groups/levels, fallback to showing general + mentor announcements
+      if (assignedLevels.length === 0 && assignedDepts.length === 0) {
+        return true;
+      }
+
+      return false;
+    });
+
+    return res.json({
+      success: true,
+      announcements: filtered,
+      data: filtered,
+      meta: {
+        mentorId: mentorId || null,
+        assignedLevels,
+        assignedDepartments: assignedDepts,
+        count: filtered.length,
+      },
+    });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('getMentorAnnouncements error:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
 
 exports.getMentorAnnouncementById = async (req, res) => {
   const { id } = req.params;
   const query = `
-    SELECT a.*, u.name AS author_name
+    SELECT a.id, a.title, a.message, a.message AS content, a.target_audience, a.created_at,
+           COALESCE(u.name, a.author_name) AS author_name,
+           a.author_id,
+           u.role AS author_role,
+           u.academic_unit AS author_academic_unit,
+           u.level AS author_level
     FROM announcements a
     LEFT JOIN users u ON a.author_id = u.id
     WHERE a.id = ?
@@ -153,15 +357,17 @@ exports.getMentorAnnouncementById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Announcement not found.' });
     }
     const announcement = results[0];
-    if (LEVEL1_AUDIENCES.includes((announcement.target_audience || '').trim())) {
+    const aud = String(announcement.target_audience || '').trim().toLowerCase();
+    if (aud.includes('level 1') || aud.includes('level1')) {
       return res.status(403).json({
         success: false,
         message: 'Industry mentors cannot access Level 1 announcements.',
       });
     }
-    res.json({ success: true, data: announcement });
+    return res.json({ success: true, announcement, data: announcement });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('getMentorAnnouncementById error:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
 
