@@ -7,7 +7,9 @@ const verifyToken = (req, res, next) => {
 
     // Token validation logic (you can integrate JWT here)
     req.token = token;
-    req.userId = req.body.created_by; // Get user ID from request
+    if (req.body) {
+        req.userId = req.body.created_by; // Get user ID from request
+    }
     next();
 };
 

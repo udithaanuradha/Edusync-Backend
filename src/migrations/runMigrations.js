@@ -61,6 +61,15 @@ const runMigrations = async () => {
       name: 'Add read_status column',
       sql: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_status BOOLEAN DEFAULT false`,
     },
+    {
+      // Scopes a stage to the degree program it was created for. NULL means
+      // "visible to everyone" — existing stages keep their current global
+      // visibility; only stages created after this migration get scoped.
+      // (Also self-healed lazily in ProjectModel.js's ensureStageAcademicUnitColumn,
+      // so this doesn't have to be run manually against every environment.)
+      name: 'Add academic_unit column to project_stages',
+      sql: `ALTER TABLE project_stages ADD COLUMN IF NOT EXISTS academic_unit VARCHAR(50) DEFAULT NULL`,
+    },
   ];
 
   for (const migration of migrations) {
