@@ -770,3 +770,76 @@ exports.getMentorCalendarEvents = async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+
+// ── 9. Mentor Project Delays (Uncompleted tasks past their due date) ─────────
+exports.getMentorProjectDelays = async (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
+  const level = req.query.level;
+
+  if (!mentorId) {
+    return res.status(400).json({ success: false, message: 'Mentor ID is required.' });
+  }
+
+  try {
+    // 1. Get all assigned project groups for this mentor
+    let groupQuery = `SELECT pg.id, pg.group_name, pg.level, pg.department 
+                      FROM project_groups pg 
+                      WHERE pg.mentor_id = ? AND pg.level > 1`;
+    let groupParams = [mentorId];
+
+    if (level && !isNaN(Number(level)) && Number(level) > 1) {
+      groupQuery += ' AND pg.level = ?';
+      groupParams.push(Number(level));
+    }
+
+    const [groups] = await queryWithRetry(groupQuery, groupParams);
+
+    if (groups.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        stats: { totalDelayed: 0, groupsCount: 0, studentsCount: 0, maxDaysOverdue: 0 },
+      });
+    }
+
+    const groupIds = groups.map((g) => g.id);
+
+    // 2. Query all tasks from these groups where due_date is in the past and status is not COMPLETED
+    const [delayedTasks] = await queryWithRetry(
+      `SELECT st.id AS task_id, st.task_name, st.description, st.status, st.due_date, st.created_at,
+              st.mentor_feedback, st.assigned_to,
+              u.name AS assigned_to_name, u.email AS assigned_to_email, u.university_id,
+              m.id AS milestone_id, m.title AS milestone_title,
+              pg.id AS group_id, pg.group_name, pg.level, pg.department,
+              DATEDIFF(CURRENT_DATE, st.due_date) AS days_overdue
+       FROM student_tasks st
+       JOIN milestones m ON m.id = st.milestone_id
+       JOIN project_groups pg ON pg.id = m.group_id
+       LEFT JOIN users u ON u.id = st.assigned_to
+       WHERE m.group_id IN (?)
+         AND UPPER(TRIM(st.status)) != 'COMPLETED'
+         AND st.due_date IS NOT NULL
+         AND st.due_date < CURRENT_DATE
+       ORDER BY st.due_date ASC, st.id ASC`,
+      [groupIds]
+    );
+
+    const affectedGroups = new Set(delayedTasks.map((t) => t.group_id)).size;
+    const affectedStudents = new Set(delayedTasks.map((t) => t.assigned_to).filter(Boolean)).size;
+    const maxDaysOverdue = delayedTasks.reduce((max, t) => Math.max(max, Number(t.days_overdue) || 0), 0);
+
+    return res.json({
+      success: true,
+      data: delayedTasks,
+      stats: {
+        totalDelayed: delayedTasks.length,
+        groupsCount: affectedGroups,
+        studentsCount: affectedStudents,
+        maxDaysOverdue,
+      },
+    });
+  } catch (err) {
+    console.error('getMentorProjectDelays error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
