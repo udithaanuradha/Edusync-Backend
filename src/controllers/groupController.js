@@ -567,11 +567,14 @@ const deleteGroup = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Group not found.' });
     }
 
+    // Delete (not just unlink) the originating request(s) so the student sees a
+    // clean slate afterwards. Previously this only cleared is_group_created/
+    // created_group_id, leaving `status` (e.g. 'approved') in place — since
+    // getStudentRequestStatus treats any row with no live created_group_id as
+    // "latest", the stale approved/pending row resurfaced and blocked the
+    // student from submitting a new group request after the old one was deleted.
     await connection.query(
-      `UPDATE group_requests
-       SET is_group_created = FALSE,
-           created_group_id = NULL,
-           processed_at = NOW()
+      `DELETE FROM group_requests
        WHERE created_group_id = ?
           OR (group_name = ? AND project_level = ?)
           OR (student_id IN (SELECT student_id FROM project_group_members WHERE group_id = ?))`,
@@ -579,6 +582,10 @@ const deleteGroup = async (req, res) => {
     );
 
     await connection.query(`DELETE FROM project_group_members WHERE group_id = ?`, [groupId]);
+    // `marks.group_id` has no ON DELETE cascade in the schema (unlike milestones/
+    // project_overviews/group_members), so evaluated groups must be cleared manually
+    // or the delete below fails with ER_ROW_IS_REFERENCED_2 (fk_mark_group).
+    await connection.query(`DELETE FROM marks WHERE group_id = ?`, [groupId]);
     await connection.query(`DELETE FROM project_groups WHERE id = ?`, [groupId]);
 
     await connection.commit();
@@ -705,7 +712,7 @@ const getGroupMembers = async (req, res) => {
       }
     }
 
-    
+
 //Fetch all member details for the target group
     const [members] = await dbPromise.query(
       `SELECT gm.group_id AS group_id, u.id AS id, u.name AS name, gm.is_leader AS is_leader
@@ -716,7 +723,27 @@ const getGroupMembers = async (req, res) => {
       [groupId]
     );
 
-    res.status(200).json({ success: true, data: members });
+    // Also resolve the group's assigned supervisor (project_groups.supervisor_id)
+    // and industry mentor (project_groups.mentor_id) so the frontend can show
+    // them alongside student members without a second round trip.
+    const [groupRows] = await dbPromise.query(
+      `SELECT pg.supervisor_id, su.name AS supervisor_name, pg.mentor_id, mu.name AS mentor_name
+       FROM project_groups pg
+       LEFT JOIN users su ON su.id = pg.supervisor_id
+       LEFT JOIN users mu ON mu.id = pg.mentor_id
+       WHERE pg.id = ?
+       LIMIT 1`,
+      [groupId]
+    );
+    const groupRow = groupRows[0] || {};
+    const supervisor = groupRow.supervisor_id
+      ? { id: groupRow.supervisor_id, name: groupRow.supervisor_name || 'Unknown Supervisor' }
+      : null;
+    const mentor = groupRow.mentor_id
+      ? { id: groupRow.mentor_id, name: groupRow.mentor_name || 'Unknown Mentor' }
+      : null;
+
+    res.status(200).json({ success: true, data: members, supervisor, mentor });
   } catch (error) {
     console.error('❌ Error fetching group members:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch group members.' });
