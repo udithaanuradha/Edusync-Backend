@@ -73,6 +73,71 @@ const createSubmission = async (req, res) => {
   }
 };
 
+const updateSubmission = async (req, res) => {
+  const submissionId = Number(req.params.submissionId);
+  const studentId = Number(req.body?.student_id ?? req.body?.studentId);
+
+  if (!submissionId || !studentId) {
+    return res.status(400).json({ success: false, message: 'submissionId and student_id are required' });
+  }
+
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (files.length === 0) {
+    return res.status(400).json({ success: false, message: 'At least one file is required' });
+  }
+
+  try {
+    // Ownership check — only the original uploader may update their own submission
+    const [existingRows] = await db.promise().query(
+      'SELECT student_id FROM student_submissions WHERE submission_id = ?',
+      [submissionId],
+    );
+
+    if (!existingRows.length) {
+      return res.status(404).json({ success: false, message: 'Submission not found' });
+    }
+
+    if (Number(existingRows[0].student_id) !== studentId) {
+      return res.status(403).json({ success: false, message: 'You can only update your own submission' });
+    }
+
+    const uploadFolder = process.env.CLOUDINARY_STUDENT_SUBMISSION_FOLDER || process.env.CLOUDINARY_SUBMISSION_FOLDER || 'student-submissions';
+    const fileUrls = [];
+
+    for (const file of files) {
+      if (!file?.buffer) {
+        return res.status(400).json({ success: false, message: 'Each uploaded file must include file data' });
+      }
+      const result = await uploadBufferToCloudinary(file.buffer, file.originalname, uploadFolder);
+      const fileUrl = result.secure_url || result.url || (result.public_id ? cloudinary.url(result.public_id, { resource_type: 'auto' }) : null);
+      if (!fileUrl) {
+        throw new Error('Cloudinary upload succeeded but no URL was returned');
+      }
+      fileUrls.push(fileUrl);
+    }
+
+    const submittedAt = new Date().toISOString();
+    const status = calculateSubmissionStatus(submittedAt, req.body.deadline || null);
+    const filePathsValue = JSON.stringify(fileUrls);
+
+    db.query(
+      'UPDATE student_submissions SET file_paths = ?, submitted_at = ?, status = ? WHERE submission_id = ? AND student_id = ?',
+      [filePathsValue, submittedAt, status, submissionId, studentId],
+      (err, result) => {
+        if (err) {
+          return res.status(500).json({ success: false, message: 'Submission could not be updated', error: err.message });
+        }
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ success: false, message: 'Submission not found' });
+        }
+        res.json({ success: true, message: 'Submission updated successfully', file_paths: fileUrls });
+      },
+    );
+  } catch (uploadErr) {
+    return res.status(500).json({ success: false, message: 'Submission update failed', error: uploadErr?.message || 'Unknown error' });
+  }
+};
+
 const getStudentSubmissions = (req, res) => {
   const { studentId } = req.params;
   const sql = `
@@ -94,6 +159,63 @@ const getStudentSubmissions = (req, res) => {
     }));
 
     res.json({ success: true, data: normalized });
+  });
+};
+
+const getGroupSubmissionsForStudent = (req, res) => {
+  const studentId = Number(req.params.studentId);
+  const level = Number(req.params.level);
+
+  if (!studentId || !level) {
+    return res.status(400).json({ success: false, message: 'studentId and level are required' });
+  }
+
+  // 1. Resolve the student's group at this level
+  const groupSql = `
+    SELECT pg.id AS group_id
+    FROM project_group_members pgm
+    JOIN project_groups pg ON pg.id = pgm.group_id
+    WHERE pgm.student_id = ? AND pg.level = ?
+    LIMIT 1
+  `;
+
+  db.query(groupSql, [studentId, level], (groupErr, groupRows) => {
+    if (groupErr) {
+      return res.status(500).json({ success: false, message: 'Unable to resolve group', error: groupErr.message });
+    }
+
+    if (!groupRows.length) {
+      // Not in a group yet at this level — nothing to show
+      return res.json({ success: true, data: [], group_id: null });
+    }
+
+    const groupId = groupRows[0].group_id;
+
+    // 2. Fetch every submission from every member of that group
+    const sql = `
+      SELECT ss.submission_id, ss.stage_id, ss.student_id, ss.file_paths, ss.submitted_at, ss.status,
+             ps.stage_name, ps.deadline,
+             u.name AS student_name
+      FROM student_submissions ss
+      JOIN project_stages ps ON ps.stage_id = ss.stage_id
+      JOIN project_group_members pgm ON pgm.student_id = ss.student_id
+      LEFT JOIN users u ON u.id = ss.student_id
+      WHERE pgm.group_id = ? AND ps.level = ?
+      ORDER BY ss.submitted_at DESC
+    `;
+
+    db.query(sql, [groupId, level], (err, results) => {
+      if (err) {
+        return res.status(500).json({ success: false, message: 'Unable to fetch group submissions', error: err.message });
+      }
+
+      const normalized = (results || []).map((row) => ({
+        ...row,
+        file_paths: typeof row.file_paths === 'string' ? JSON.parse(row.file_paths) : row.file_paths || [],
+      }));
+
+      res.json({ success: true, data: normalized, group_id: groupId });
+    });
   });
 };
 
@@ -209,7 +331,9 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
 
 module.exports = {
   createSubmission,
+  updateSubmission,
   getStudentSubmissions,
+  getGroupSubmissionsForStudent,
   deleteSubmission,
   getCoordinatorSubmissionsByLevel,
 };

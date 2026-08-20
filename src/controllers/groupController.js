@@ -310,9 +310,20 @@ const getCoordinatorApprovedRequests = async (req, res) => {
   const rawLevel = req.query.level;
   const level = rawLevel === undefined ? null : Number(rawLevel);
   const finalOnly = String(req.query.finalOnly || '0') === '1' ? 1 : 0;
+  const coordinatorId = req.query.coordinatorId ? Number(req.query.coordinatorId) : null;
 
   try {
     await ensureRequestLifecycleColumns();
+
+    // Scope results to the requesting coordinator's own department so
+    // requests aren't shared across every coordinator at a level. If
+    // coordinatorId is missing/unresolved, coordinatorDepartment stays null
+    // and the added WHERE condition below passes through unfiltered.
+    let coordinatorDepartment = null;
+    if (coordinatorId) {
+      const [coordRows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
+      coordinatorDepartment = coordRows[0]?.academic_unit || null;
+    }
 
     // Build the WHERE clause dynamically
     let whereCondition = `gr.status = 'approved'
@@ -320,8 +331,9 @@ const getCoordinatorApprovedRequests = async (req, res) => {
            SELECT 1 FROM project_groups pg WHERE pg.id = gr.created_group_id
          ))
          AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
-         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)`;
-    let params = [finalOnly, level, level];
+         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)
+         AND (? IS NULL OR student.academic_unit = ?)`;
+    let params = [finalOnly, level, level, coordinatorDepartment, coordinatorDepartment];
 
     const [rows] = await dbPromise.query(
       `SELECT gr.*, student.name AS student_name, student.level AS student_level,
@@ -876,10 +888,10 @@ const createGroupRequest = async (req, res) => {
           hasLiveCreatedGroup = liveGroupRows.length > 0;
         }
 
-        const staleRequestState = previous.status !== 'rejected' && (
+        const staleRequestState =
+          previous.status === 'rejected' ||
           Number(previous.is_group_created || 0) === 0 ||
-          !hasLiveCreatedGroup
-        );
+          !hasLiveCreatedGroup;
 
         if (!staleRequestState) {
           await conn.rollback();
