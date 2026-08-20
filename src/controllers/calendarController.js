@@ -4,6 +4,33 @@
  * Routes are mounted under `/api/calendar` in index.js.
  */
 const db = require('../config/db');
+const dbPromise = db.promise();
+
+// `evaluation_panels` has no concept of completion — a panel only ever
+// leaves the coordinator's calendar once its date is in the past, or it's
+// manually deleted, even after the evaluation it covers is actually done.
+// This column plus getUpcomingPanels' `status != 'completed'` filter below
+// are groundwork for that: nothing sets a panel to 'completed' yet — that
+// still needs a real trigger (e.g. a coordinator "finalize marks" action),
+// which hasn't been built. Self-heals the same way ProjectModel's
+// ensureStageAcademicUnitColumn does.
+let ensureEvaluationPanelStatusColumnPromise = null;
+const ensureEvaluationPanelStatusColumn = async () => {
+    if (!ensureEvaluationPanelStatusColumnPromise) {
+        ensureEvaluationPanelStatusColumnPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM evaluation_panels');
+                const hasColumn = (columns || []).some((column) => column.Field === 'status');
+                if (!hasColumn) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'scheduled'`);
+                }
+            } catch (error) {
+                console.warn('evaluation_panels status column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureEvaluationPanelStatusColumnPromise;
+};
 
 /**
  * Schedule an evaluation panel
@@ -36,12 +63,26 @@ const scheduleEvaluationPanel = async (req, res) => {
 };
 
 /**
- * Fetch a small list of upcoming panels for sidebar or quick view.
+ * Fetch upcoming panels. Used by the coordinator Calendar page to populate
+ * BOTH the "Upcoming Panels" sidebar and the whole month grid's per-day
+ * panel-count markers (CalendarPage.tsx's loadPanelsFromServer/markerMap).
  * Returns panels with panel_date >= CURRENT_DATE ordered by date/time.
+ *
+ * NOTE: this previously carried `LIMIT 5` (meant only for a small sidebar
+ * preview), which silently truncated the result set the month grid depends
+ * on — once total upcoming panels across all days exceeded 5, any panels
+ * past that cutoff were dropped from the grid's per-day counts, making days
+ * with multiple panels undercount (e.g. always showing "1 Panel"). This is
+ * the only consumer of this endpoint, so the cap was removed rather than
+ * raised.
  */
 const getUpcomingPanels = async (req, res) => {
     try {
-        const query = 'SELECT * FROM evaluation_panels WHERE panel_date >= CURRENT_DATE ORDER BY panel_date ASC, start_time ASC LIMIT 5';
+        await ensureEvaluationPanelStatusColumn();
+
+        const query = `SELECT * FROM evaluation_panels
+                        WHERE panel_date >= CURRENT_DATE AND status != 'completed'
+                        ORDER BY panel_date ASC, start_time ASC`;
 
         // Await the rows from the database and forward them to the client.
         const [results] = await db.promise().query(query);
@@ -114,4 +155,5 @@ module.exports = {
     deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
+    ensureEvaluationPanelStatusColumn,
 };
