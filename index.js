@@ -304,6 +304,9 @@ app.use("/api/groups", mentorGroupRoutes);
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
 
+const groupDetailsToSupervisorDashboardRoutes = require("./src/routes/groupDetailsToSupervisorDashboardRoutes");
+app.use("/api/groupdetailstosupervisordashboard", groupDetailsToSupervisorDashboardRoutes);
+
 const calendarRoutes = require("./src/routes/calendarRoutes");
 app.use("/api/calendar", calendarRoutes);
 
@@ -318,6 +321,9 @@ app.use("/api/messages", messageRoutes);
 
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
+app.use("/api/meeting-requests", meetingRequestRoutes);
 
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);
@@ -347,13 +353,34 @@ const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
 app.use("/api/admin/mentors", mentorOnboardingRoutes);
 app.use("/api/mentor-onboarding", mentorOnboardingRoutes);
 
-// --- 7. Server Initialization ---
+// --- 7. Server Initialization & Socket.IO V2 ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 
+// V2 Real-time Chat Routes
+const messageV2Routes = require("./src/routes/messageV2Routes");
+app.use("/api/v2/messages", messageV2Routes);
+
 app.use((err, req, res, next) => {
-  console.error("❌ Global Error Handler:", err);
+  console.error("Global Error Handler:", err);
   res.status(500).json({ success: false, error: err.message || "Internal server error" });
 });
 
+const http = require("http");
+const server = http.createServer(app);
+
+try {
+  const { setupSocketV2 } = require("./src/sockets/socketV2");
+  setupSocketV2(server, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST", "PATCH"],
+      credentials: true,
+    }
+  });
+  console.log("⚡ Socket.IO V2 Server initialized!");
+} catch (socketErr) {
+  console.warn("⚠️ Socket.IO V2 setup warning:", socketErr.message);
+}
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
