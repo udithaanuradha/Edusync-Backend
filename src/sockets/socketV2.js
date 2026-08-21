@@ -3,6 +3,9 @@ const { createAdapter } = require('@socket.io/redis-adapter');
 const jwt = require('jsonwebtoken');
 const redisConfig = require('../config/redis');
 const MessageV2Model = require('../models/MessageV2Model');
+const GroupConversationV2Model = require('../models/GroupConversationV2Model');
+
+const groupConversationRoom = (conversationId) => `room:conversation_${conversationId}`;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_super_secret_jwt_key_here';
 const memoryOnlineUsers = new Set();
@@ -91,6 +94,16 @@ function setupSocketV2(httpServer, corsOptions = {}) {
     // Send active online users list to connected user
     socket.emit('presence:sync', Array.from(memoryOnlineUsers));
 
+    // Join every group conversation (supervisor<->group, mentor<->group)
+    // this user currently belongs to, so group sends can reach them with a
+    // single room emit instead of a per-recipient fan-out.
+    try {
+      const groupConversations = await GroupConversationV2Model.getMyConversations(userId);
+      groupConversations.forEach((c) => socket.join(groupConversationRoom(c.conversation_id)));
+    } catch (err) {
+      console.warn('⚠️ [SocketV2] Failed joining group conversation rooms:', err.message);
+    }
+
     // Send Message
     socket.on('message:send', async (payload, callback) => {
       try {
@@ -118,6 +131,40 @@ function setupSocketV2(httpServer, corsOptions = {}) {
         }
       } catch (error) {
         console.error('❌ [SocketV2] Error saving message:', error);
+        if (typeof callback === 'function') callback({ success: false, error: error.message });
+      }
+    });
+
+    // Send Group Message (supervisor<->group, mentor<->group) — a separate
+    // event name from message:send so the existing 1:1 handler above is
+    // never touched by this.
+    socket.on('group:send', async (payload, callback) => {
+      try {
+        const conversationId = Number(payload?.conversation_id);
+        const messageText = payload?.message_text;
+        if (!conversationId || !messageText?.trim()) {
+          if (typeof callback === 'function') callback({ success: false, error: 'Invalid payload' });
+          return;
+        }
+
+        if (!(await GroupConversationV2Model.isMember(conversationId, userId))) {
+          if (typeof callback === 'function') callback({ success: false, error: 'Not a member of this conversation' });
+          return;
+        }
+
+        const savedMessage = await GroupConversationV2Model.saveMessage(
+          conversationId,
+          userId,
+          messageText.trim()
+        );
+
+        io.to(groupConversationRoom(conversationId)).emit('group:message:received', savedMessage);
+
+        if (typeof callback === 'function') {
+          callback({ success: true, data: savedMessage });
+        }
+      } catch (error) {
+        console.error('❌ [SocketV2] Error saving group message:', error);
         if (typeof callback === 'function') callback({ success: false, error: error.message });
       }
     });
