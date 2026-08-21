@@ -761,8 +761,10 @@ const getGroupMembers = async (req, res) => {
  */
 const getSupervisors = async (req, res) => {
   try {
+    // academic_unit added so the Schedule Panel evaluator picker
+    // (CalendarPage.tsx) can group supervisors by department (IT/CM/ITM).
     const [results] = await dbPromise.query(
-      `SELECT id, name FROM users
+      `SELECT id, name, email, academic_unit FROM users
        WHERE role = 'supervisor' OR (role = 'lecturer' AND designation = 'supervisor')
        ORDER BY name ASC`
     );
