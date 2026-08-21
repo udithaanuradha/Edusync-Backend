@@ -32,26 +32,64 @@ const ensureEvaluationPanelStatusColumn = async () => {
     await ensureEvaluationPanelStatusColumnPromise;
 };
 
+// CalendarPage.tsx's schedule drawer sends meetingLink/notes/kind and expects
+// to read them back (row.meeting_link, row.notes, row.kind — see
+// normalizePanelFromApi), but the table never had columns for them and
+// scheduleEvaluationPanel silently dropped all three. Self-heals the same
+// way ensureEvaluationPanelStatusColumn does.
+let ensureEvaluationPanelMeetingColumnsPromise = null;
+const ensureEvaluationPanelMeetingColumns = async () => {
+    if (!ensureEvaluationPanelMeetingColumnsPromise) {
+        ensureEvaluationPanelMeetingColumnsPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM evaluation_panels');
+                const fields = new Set((columns || []).map((column) => column.Field));
+
+                if (!fields.has('meeting_link')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN meeting_link VARCHAR(500) NULL`);
+                }
+                if (!fields.has('notes')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN notes TEXT NULL`);
+                }
+                if (!fields.has('kind')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN kind VARCHAR(100) NOT NULL DEFAULT 'Coordinator scheduled panel'`);
+                }
+            } catch (error) {
+                console.warn('evaluation_panels meeting/notes/kind column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureEvaluationPanelMeetingColumnsPromise;
+};
+
 /**
  * Schedule an evaluation panel
- * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location }
+ * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
  * Stores evaluators as JSON text in the `evaluation_panels` table.
  */
 const scheduleEvaluationPanel = async (req, res) => {
-    const { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location } = req.body;
+    const {
+        evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location,
+        meetingLink, notes, kind,
+    } = req.body;
 
     try {
+        await ensureEvaluationPanelMeetingColumns();
+
         // Convert evaluators array/object into a JSON string for storage.
         const evaluatorsString = JSON.stringify(evaluators);
 
         const query = `
-            INSERT INTO evaluation_panels 
-            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO evaluation_panels
+            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location, meeting_link, notes, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         // Use the promise wrapper on the pool to await the query result.
-        await db.promise().query(query, [evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location]);
+        await db.promise().query(query, [
+            evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location,
+            meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
+        ]);
 
         // Respond with a success message on creation.
         res.status(201).json({ message: 'Evaluation panel scheduled successfully!' });
