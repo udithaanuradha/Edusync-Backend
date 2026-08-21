@@ -567,11 +567,14 @@ const deleteGroup = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Group not found.' });
     }
 
+    // Delete (not just unlink) the originating request(s) so the student sees a
+    // clean slate afterwards. Previously this only cleared is_group_created/
+    // created_group_id, leaving `status` (e.g. 'approved') in place — since
+    // getStudentRequestStatus treats any row with no live created_group_id as
+    // "latest", the stale approved/pending row resurfaced and blocked the
+    // student from submitting a new group request after the old one was deleted.
     await connection.query(
-      `UPDATE group_requests
-       SET is_group_created = FALSE,
-           created_group_id = NULL,
-           processed_at = NOW()
+      `DELETE FROM group_requests
        WHERE created_group_id = ?
           OR (group_name = ? AND project_level = ?)
           OR (student_id IN (SELECT student_id FROM project_group_members WHERE group_id = ?))`,
@@ -579,6 +582,10 @@ const deleteGroup = async (req, res) => {
     );
 
     await connection.query(`DELETE FROM project_group_members WHERE group_id = ?`, [groupId]);
+    // `marks.group_id` has no ON DELETE cascade in the schema (unlike milestones/
+    // project_overviews/group_members), so evaluated groups must be cleared manually
+    // or the delete below fails with ER_ROW_IS_REFERENCED_2 (fk_mark_group).
+    await connection.query(`DELETE FROM marks WHERE group_id = ?`, [groupId]);
     await connection.query(`DELETE FROM project_groups WHERE id = ?`, [groupId]);
 
     await connection.commit();

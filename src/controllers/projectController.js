@@ -8,13 +8,17 @@ const { uploadBufferToCloudinary } = require('../config/cloudinaryConfig');
 /**
  * GET /api/projects/level/:level
  * Returns all stages for the provided `level`.
- * If ?coordinatorId=X is provided, filters to only stages created by that coordinator.
+ * If ?coordinatorId=X is provided, filters to only stages created by that coordinator
+ * (coordinator's own management view — sees everything they created).
+ * Otherwise, if ?academicUnit=X is provided, filters to stages scoped to that degree
+ * program plus any legacy/global stage with no program scoping (student-facing view).
  */
 const getStagesByLevel = (req, res) => {
     const level = req.params.level;
     const coordinatorId = req.query.coordinatorId; // Extract from query string
-    
-    Project.getStagesByLevel(level, coordinatorId, (err, results) => {
+    const academicUnit = req.query.academicUnit;
+
+    Project.getStagesByLevel(level, coordinatorId, academicUnit, (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, data: results });
     });

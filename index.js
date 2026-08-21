@@ -59,7 +59,7 @@ app.post("/api/login", (req, res) => {
     return res.status(400).json({ error: "Email and password required" });
 
   db.query(
-    "SELECT id, name, email, role, designation, level, is_verified FROM users WHERE email = ? AND password = ?",
+    "SELECT id, name, email, role, designation, level, academic_unit, is_verified FROM users WHERE email = ? AND password = ?",
     [email, password],
     (err, results) => {
       if (err) return res.status(500).json({ error: "Internal server error" });
