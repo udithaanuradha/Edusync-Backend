@@ -48,6 +48,10 @@ router.get('/submissions/:level', mentorController.getMentorSubmissions);
 // -- Calendar Events (Student Tasks, Milestones, Stage Deadlines) --
 router.get('/calendar-events', mentorController.getMentorCalendarEvents);
 
+// -- Project Delays (Delayed student tasks past their due date) --
+router.get('/project-delays/:mentorId', mentorController.getMentorProjectDelays);
+router.get('/project-delays', mentorController.getMentorProjectDelays);
+
 // ── Announcements ─────────────────────────────────────────────────────────────
 // GET /api/mentor/announcements
 // Returns all announcements scoped to mentor's assigned level and mentor-targeted announcements
