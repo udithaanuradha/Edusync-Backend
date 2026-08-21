@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
 const db = require('../config/db');
 const { sendMentorInviteEmail } = require('../config/emailConfig');
 const { validatePassword } = require('../utils/validators');
@@ -45,7 +46,6 @@ router.post('/preview-upload', (req, res) => {
 // 2. BULK SEND INVITES VIA SMTP RELAY
 router.post('/send-invites', async (req, res) => {
   const { mentors, academicUnit, level } = req.body; 
-
   if (!mentors || mentors.length === 0) {
     return res.status(400).json({ error: "No mentors selected for invitation." });
   }
@@ -78,7 +78,7 @@ router.post('/send-invites', async (req, res) => {
 });
 
 // 3. FIRST TIME PASSWORD SETTINGS & DB INSERTION / UPDATE
-router.post('/finalize-setup', (req, res) => {
+router.post('/finalize-setup', async (req, res) => {
   const { token, username, password } = req.body;
 
   if (!token || !username || !password) {
@@ -96,7 +96,11 @@ router.post('/finalize-setup', (req, res) => {
     const targetGroupId = groupId ? Number(groupId) : null;
     const mentorFullName = (name && name.trim()) ? name.trim() : username;
 
-    db.query("SELECT id FROM users WHERE email = ?", [email], (err, users) => {
+    // Hash password with bcrypt
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    db.query("SELECT id FROM users WHERE LOWER(TRIM(email)) = ?", [email.trim().toLowerCase()], (err, users) => {
       if (err) return res.status(500).json({ error: "Database error during duplicate checks." });
 
       const handleGroupLink = (userId) => {
@@ -114,7 +118,7 @@ router.post('/finalize-setup', (req, res) => {
         // Update existing mentor record and ensure is_verified = 1
         const userId = users[0].id;
         const updateSql = `UPDATE users SET name = ?, password = ?, is_verified = 1 WHERE id = ?`;
-        db.query(updateSql, [mentorFullName, password, userId], (updateErr) => {
+        db.query(updateSql, [mentorFullName, hashedPassword, userId], (updateErr) => {
           if (updateErr) return res.status(500).json({ error: "Failed to update mentor profile." });
           handleGroupLink(userId);
         });
@@ -124,7 +128,7 @@ router.post('/finalize-setup', (req, res) => {
           INSERT INTO users (name, email, phone, password, role, academic_unit, level, designation, is_verified) 
           VALUES (?, ?, ?, ?, 'mentor', ?, ?, NULL, 1)
         `;
-        db.query(insertUserSql, [mentorFullName, email, phone || null, password, academicUnit || 'ITM', targetLevel], (insertErr, insertResult) => {
+        db.query(insertUserSql, [mentorFullName, email.trim().toLowerCase(), phone || null, hashedPassword, academicUnit || 'ITM', targetLevel], (insertErr, insertResult) => {
           if (insertErr) {
             console.error("❌ Error creating mentor user in DB:", insertErr);
             return res.status(500).json({ error: "Failed to create user profile in database." });
