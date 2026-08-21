@@ -121,19 +121,89 @@ exports.filterLevel1FromMentorAnnouncements = (announcements) => {
 
 // ── 3. Standalone mentor announcements endpoint ──────────────────────────────
 exports.getMentorAnnouncements = async (req, res) => {
-  const query = `
-    SELECT a.*, u.name AS author_name
-    FROM announcements a
-    LEFT JOIN users u ON a.author_id = u.id
-    WHERE a.target_audience NOT IN (?, ?, ?, ?)
-       OR a.target_audience IS NULL
-    ORDER BY a.created_at DESC
-  `;
+  const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'] || req.user?.id;
 
   try {
-    const [results] = await queryWithRetry(query, LEVEL1_AUDIENCES);
-    res.json({ success: true, data: results });
+    let assignedLevels = [];
+    let assignedDepartments = [];
+    let assignedGroups = [];
+
+    if (mentorId) {
+      const [groups] = await queryWithRetry(
+        `SELECT id, group_name, level, department FROM project_groups WHERE mentor_id = ?`,
+        [mentorId]
+      );
+      assignedGroups = groups || [];
+      assignedLevels = Array.from(new Set(assignedGroups.map((g) => Number(g.level)).filter((lvl) => lvl > 1)));
+      assignedDepartments = Array.from(new Set(assignedGroups.map((g) => g.department).filter(Boolean)));
+    }
+
+    // Build smart where conditions for Mentor:
+    // 1. Never show Level 1
+    // 2. Always show general/system announcements ('All', 'All system users')
+    // 3. Always show announcements targeted to 'mentor' / 'mentors'
+    // 4. Show announcements for assigned levels (e.g. Level 2)
+    // 5. Show announcements for assigned groups (e.g. Cygen 123)
+    // 6. Show announcements authored by this mentor
+
+    let whereClauses = [];
+    let params = [];
+
+    // Exclude Level 1 strictly
+    whereClauses.push(
+      `(LOWER(a.target_audience) NOT LIKE '%level1%' AND LOWER(a.target_audience) NOT LIKE '%level 1%' OR a.target_audience IS NULL)`
+    );
+
+    let relevanceConditions = [
+      `LOWER(a.target_audience) IN ('all', 'all system users')`,
+      `LOWER(a.target_audience) LIKE '%mentor%'`,
+    ];
+
+    if (mentorId) {
+      relevanceConditions.push(`a.author_id = ?`);
+      params.push(Number(mentorId));
+    }
+
+    assignedLevels.forEach((lvl) => {
+      relevanceConditions.push(`LOWER(a.target_audience) LIKE ?`);
+      params.push(`%level${lvl}%`);
+      relevanceConditions.push(`LOWER(a.target_audience) LIKE ?`);
+      params.push(`%level ${lvl}%`);
+    });
+
+    assignedGroups.forEach((g) => {
+      if (g.group_name && g.group_name.trim()) {
+        relevanceConditions.push(`LOWER(a.target_audience) LIKE ?`);
+        params.push(`%${g.group_name.toLowerCase().trim()}%`);
+      }
+    });
+
+    whereClauses.push(`(${relevanceConditions.join(' OR ')})`);
+
+    const query = `
+      SELECT a.*, COALESCE(u.name, a.author_name) AS author_name, u.role AS author_role
+      FROM announcements a
+      LEFT JOIN users u ON a.author_id = u.id
+      WHERE ${whereClauses.join(' AND ')}
+      ORDER BY a.created_at DESC
+    `;
+
+    const [results] = await queryWithRetry(query, params);
+
+    res.json({
+      success: true,
+      data: results || [],
+      announcements: results || [],
+      meta: {
+        mentorId: mentorId || null,
+        assignedLevels,
+        assignedDepartments,
+        assignedGroups: assignedGroups.map((g) => ({ id: g.id, groupName: g.group_name, level: g.level })),
+        count: (results || []).length,
+      },
+    });
   } catch (err) {
+    console.error('[getMentorAnnouncements] Error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -141,7 +211,7 @@ exports.getMentorAnnouncements = async (req, res) => {
 exports.getMentorAnnouncementById = async (req, res) => {
   const { id } = req.params;
   const query = `
-    SELECT a.*, u.name AS author_name
+    SELECT a.*, COALESCE(u.name, a.author_name) AS author_name, u.role AS author_role
     FROM announcements a
     LEFT JOIN users u ON a.author_id = u.id
     WHERE a.id = ?
@@ -161,6 +231,134 @@ exports.getMentorAnnouncementById = async (req, res) => {
     }
     res.json({ success: true, data: announcement });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.createMentorAnnouncement = async (req, res) => {
+  const mentorId = req.body.mentorId || req.body.author_id || req.headers['x-user-id'] || req.user?.id;
+  const { title, message, target_audience, groupId } = req.body;
+
+  if (!title || !title.trim() || !message || !message.trim()) {
+    return res.status(400).json({ success: false, error: 'Title and message are required.' });
+  }
+
+  try {
+    let mentorName = req.body.author_name || 'Industry Mentor';
+    let assignedGroups = [];
+
+    if (mentorId) {
+      const [users] = await queryWithRetry('SELECT name FROM users WHERE id = ?', [mentorId]);
+      if (users.length > 0 && users[0].name) {
+        mentorName = users[0].name;
+      }
+      const [groups] = await queryWithRetry(
+        'SELECT id, group_name, level FROM project_groups WHERE mentor_id = ?',
+        [mentorId]
+      );
+      assignedGroups = groups || [];
+    }
+
+    let finalAudience = target_audience;
+    if (groupId) {
+      const matched = assignedGroups.find((g) => Number(g.id) === Number(groupId));
+      if (matched) {
+        finalAudience = `Level ${matched.level} Assigned Students (${matched.group_name})`;
+      }
+    }
+
+    if (!finalAudience) {
+      if (assignedGroups.length > 0) {
+        const lvl = assignedGroups[0].level;
+        finalAudience = `Level ${lvl} Assigned Students`;
+      } else {
+        finalAudience = 'Assigned Students';
+      }
+    }
+
+    const insertSql = `
+      INSERT INTO announcements (title, message, target_audience, author_name, author_id)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+
+    const [result] = await queryWithRetry(insertSql, [
+      title.trim(),
+      message.trim(),
+      finalAudience.trim(),
+      mentorName,
+      mentorId ? Number(mentorId) : null,
+    ]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Announcement posted successfully for your assigned students!',
+      announcement: {
+        id: result.insertId,
+        title: title.trim(),
+        message: message.trim(),
+        target_audience: finalAudience.trim(),
+        author_name: mentorName,
+        author_id: mentorId ? Number(mentorId) : null,
+        created_at: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error('[createMentorAnnouncement] Error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.updateMentorAnnouncement = async (req, res) => {
+  const { id } = req.params;
+  const mentorId = req.body.mentorId || req.headers['x-user-id'] || req.user?.id;
+  const { title, message } = req.body;
+
+  if (!title || !message) {
+    return res.status(400).json({ success: false, error: 'Title and message are required.' });
+  }
+
+  try {
+    let sql = `UPDATE announcements SET title = ?, message = ? WHERE id = ?`;
+    let params = [title.trim(), message.trim(), id];
+
+    if (mentorId) {
+      sql += ` AND author_id = ?`;
+      params.push(Number(mentorId));
+    }
+
+    const [result] = await queryWithRetry(sql, params);
+    if (result.affectedRows === 0) {
+      return res.status(403).json({ success: false, error: 'Cannot update announcement or unauthorized.' });
+    }
+
+    res.json({ success: true, message: 'Announcement updated successfully.' });
+  } catch (err) {
+    console.error('[updateMentorAnnouncement] Error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+exports.deleteMentorAnnouncement = async (req, res) => {
+  const { id } = req.params;
+  const mentorId = req.query.mentorId || req.headers['x-user-id'] || req.user?.id;
+
+  try {
+    let sql = `DELETE FROM announcements WHERE id = ?`;
+    let params = [id];
+
+    if (mentorId) {
+      sql += ` AND author_id = ?`;
+      params.push(Number(mentorId));
+    }
+
+    const [result] = await queryWithRetry(sql, params);
+    if (result.affectedRows === 0) {
+      return res.status(403).json({ success: false, error: 'Cannot delete announcement or unauthorized.' });
+    }
+
+    res.json({ success: true, message: 'Announcement deleted successfully.' });
+  } catch (err) {
+    console.error('[deleteMentorAnnouncement] Error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -569,6 +767,79 @@ exports.getMentorCalendarEvents = async (req, res) => {
     });
   } catch (err) {
     console.error('getMentorCalendarEvents error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// ── 9. Mentor Project Delays (Uncompleted tasks past their due date) ─────────
+exports.getMentorProjectDelays = async (req, res) => {
+  const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
+  const level = req.query.level;
+
+  if (!mentorId) {
+    return res.status(400).json({ success: false, message: 'Mentor ID is required.' });
+  }
+
+  try {
+    // 1. Get all assigned project groups for this mentor
+    let groupQuery = `SELECT pg.id, pg.group_name, pg.level, pg.department 
+                      FROM project_groups pg 
+                      WHERE pg.mentor_id = ? AND pg.level > 1`;
+    let groupParams = [mentorId];
+
+    if (level && !isNaN(Number(level)) && Number(level) > 1) {
+      groupQuery += ' AND pg.level = ?';
+      groupParams.push(Number(level));
+    }
+
+    const [groups] = await queryWithRetry(groupQuery, groupParams);
+
+    if (groups.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        stats: { totalDelayed: 0, groupsCount: 0, studentsCount: 0, maxDaysOverdue: 0 },
+      });
+    }
+
+    const groupIds = groups.map((g) => g.id);
+
+    // 2. Query all tasks from these groups where due_date is in the past and status is not COMPLETED
+    const [delayedTasks] = await queryWithRetry(
+      `SELECT st.id AS task_id, st.task_name, st.description, st.status, st.due_date, st.created_at,
+              st.mentor_feedback, st.assigned_to,
+              u.name AS assigned_to_name, u.email AS assigned_to_email, u.university_id,
+              m.id AS milestone_id, m.title AS milestone_title,
+              pg.id AS group_id, pg.group_name, pg.level, pg.department,
+              DATEDIFF(CURRENT_DATE, st.due_date) AS days_overdue
+       FROM student_tasks st
+       JOIN milestones m ON m.id = st.milestone_id
+       JOIN project_groups pg ON pg.id = m.group_id
+       LEFT JOIN users u ON u.id = st.assigned_to
+       WHERE m.group_id IN (?)
+         AND UPPER(TRIM(st.status)) != 'COMPLETED'
+         AND st.due_date IS NOT NULL
+         AND st.due_date < CURRENT_DATE
+       ORDER BY st.due_date ASC, st.id ASC`,
+      [groupIds]
+    );
+
+    const affectedGroups = new Set(delayedTasks.map((t) => t.group_id)).size;
+    const affectedStudents = new Set(delayedTasks.map((t) => t.assigned_to).filter(Boolean)).size;
+    const maxDaysOverdue = delayedTasks.reduce((max, t) => Math.max(max, Number(t.days_overdue) || 0), 0);
+
+    return res.json({
+      success: true,
+      data: delayedTasks,
+      stats: {
+        totalDelayed: delayedTasks.length,
+        groupsCount: affectedGroups,
+        studentsCount: affectedStudents,
+        maxDaysOverdue,
+      },
+    });
+  } catch (err) {
+    console.error('getMentorProjectDelays error:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 };

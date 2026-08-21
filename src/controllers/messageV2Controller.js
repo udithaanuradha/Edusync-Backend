@@ -1,4 +1,5 @@
 const MessageV2Model = require('../models/MessageV2Model');
+const { canMessage } = require('../utils/chatPermissionsV2');
 
 class MessageV2Controller {
   static async getConversations(req, res) {
@@ -39,6 +40,11 @@ class MessageV2Controller {
       if (!sender_id || !receiver_id || !message_text?.trim()) {
         return res.status(400).json({ error: 'sender_id, receiver_id, and message_text are required' });
       }
+
+      if (!(await canMessage(sender_id, receiver_id))) {
+        return res.status(403).json({ error: 'You are not allowed to message this user.' });
+      }
+
       const savedMessage = await MessageV2Model.saveMessage({
         sender_id,
         receiver_id,
