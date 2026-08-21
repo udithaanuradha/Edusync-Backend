@@ -93,6 +93,50 @@ const getUpcomingPanels = async (req, res) => {
     }
 };
 
+/**
+ * Coordinator-driven completion, called from the Reports/Gradebook marksheet
+ * (SupervisorReportPanel.tsx). Proposal/Interim/Code Review/Final each
+ * happen at genuinely different points in the year for a given group, so
+ * completion is scoped per (group, stage) — NOT deferred until Final —
+ * otherwise an already-finished Proposal panel from months ago would keep
+ * sitting on the calendar as "upcoming" until Final finally happens.
+ *
+ * `stageName` is optional for backward compatibility: if provided, only that
+ * group's panel for that specific stage is completed (the normal case, one
+ * "Complete" click per stage cell); if omitted, every still-scheduled panel
+ * for the given group(s) is completed regardless of stage.
+ * Expects body: { level, groupNames: string[], stageName?: string }
+ */
+const completePanelsForGroups = async (req, res) => {
+    const { level, groupNames, stageName } = req.body;
+    const academicLevel = Number(level);
+
+    if (!academicLevel || !Array.isArray(groupNames) || groupNames.length === 0) {
+        return res.status(400).json({ success: false, message: 'level and a non-empty groupNames array are required.' });
+    }
+
+    try {
+        await ensureEvaluationPanelStatusColumn();
+
+        let query = `UPDATE evaluation_panels
+                      SET status = 'completed'
+                      WHERE academic_level = ? AND target_group IN (?) AND status != 'completed'`;
+        const params = [academicLevel, groupNames];
+
+        if (stageName) {
+            query += ` AND LOWER(TRIM(evaluation_type)) = LOWER(TRIM(?))`;
+            params.push(stageName);
+        }
+
+        const [result] = await db.promise().query(query, params);
+
+        return res.status(200).json({ success: true, panelsUpdated: result.affectedRows });
+    } catch (error) {
+        console.error('Database error (completePanelsForGroups):', error);
+        return res.status(500).json({ success: false, message: 'Failed to complete panels.' });
+    }
+};
+
 const deleteEvaluationPanel = async (req, res) => {
     const panelId = Number(req.params.id);
 
@@ -152,6 +196,7 @@ const getFrozenDates = async (req, res) => {
 module.exports = {
     scheduleEvaluationPanel,
     getUpcomingPanels,
+    completePanelsForGroups,
     deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
