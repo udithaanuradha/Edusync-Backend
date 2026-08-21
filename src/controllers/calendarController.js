@@ -32,26 +32,64 @@ const ensureEvaluationPanelStatusColumn = async () => {
     await ensureEvaluationPanelStatusColumnPromise;
 };
 
+// CalendarPage.tsx's schedule drawer sends meetingLink/notes/kind and expects
+// to read them back (row.meeting_link, row.notes, row.kind — see
+// normalizePanelFromApi), but the table never had columns for them and
+// scheduleEvaluationPanel silently dropped all three. Self-heals the same
+// way ensureEvaluationPanelStatusColumn does.
+let ensureEvaluationPanelMeetingColumnsPromise = null;
+const ensureEvaluationPanelMeetingColumns = async () => {
+    if (!ensureEvaluationPanelMeetingColumnsPromise) {
+        ensureEvaluationPanelMeetingColumnsPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM evaluation_panels');
+                const fields = new Set((columns || []).map((column) => column.Field));
+
+                if (!fields.has('meeting_link')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN meeting_link VARCHAR(500) NULL`);
+                }
+                if (!fields.has('notes')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN notes TEXT NULL`);
+                }
+                if (!fields.has('kind')) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN kind VARCHAR(100) NOT NULL DEFAULT 'Coordinator scheduled panel'`);
+                }
+            } catch (error) {
+                console.warn('evaluation_panels meeting/notes/kind column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureEvaluationPanelMeetingColumnsPromise;
+};
+
 /**
  * Schedule an evaluation panel
- * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location }
+ * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
  * Stores evaluators as JSON text in the `evaluation_panels` table.
  */
 const scheduleEvaluationPanel = async (req, res) => {
-    const { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location } = req.body;
+    const {
+        evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location,
+        meetingLink, notes, kind,
+    } = req.body;
 
     try {
+        await ensureEvaluationPanelMeetingColumns();
+
         // Convert evaluators array/object into a JSON string for storage.
         const evaluatorsString = JSON.stringify(evaluators);
 
         const query = `
-            INSERT INTO evaluation_panels 
-            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO evaluation_panels
+            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location, meeting_link, notes, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         // Use the promise wrapper on the pool to await the query result.
-        await db.promise().query(query, [evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location]);
+        await db.promise().query(query, [
+            evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location,
+            meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
+        ]);
 
         // Respond with a success message on creation.
         res.status(201).json({ message: 'Evaluation panel scheduled successfully!' });
@@ -90,6 +128,50 @@ const getUpcomingPanels = async (req, res) => {
     } catch (error) {
         console.error('Database error (getUpcomingPanels):', error);
         res.status(500).json({ error: 'Failed to fetch upcoming panels' });
+    }
+};
+
+/**
+ * Coordinator-driven completion, called from the Reports/Gradebook marksheet
+ * (SupervisorReportPanel.tsx). Proposal/Interim/Code Review/Final each
+ * happen at genuinely different points in the year for a given group, so
+ * completion is scoped per (group, stage) — NOT deferred until Final —
+ * otherwise an already-finished Proposal panel from months ago would keep
+ * sitting on the calendar as "upcoming" until Final finally happens.
+ *
+ * `stageName` is optional for backward compatibility: if provided, only that
+ * group's panel for that specific stage is completed (the normal case, one
+ * "Complete" click per stage cell); if omitted, every still-scheduled panel
+ * for the given group(s) is completed regardless of stage.
+ * Expects body: { level, groupNames: string[], stageName?: string }
+ */
+const completePanelsForGroups = async (req, res) => {
+    const { level, groupNames, stageName } = req.body;
+    const academicLevel = Number(level);
+
+    if (!academicLevel || !Array.isArray(groupNames) || groupNames.length === 0) {
+        return res.status(400).json({ success: false, message: 'level and a non-empty groupNames array are required.' });
+    }
+
+    try {
+        await ensureEvaluationPanelStatusColumn();
+
+        let query = `UPDATE evaluation_panels
+                      SET status = 'completed'
+                      WHERE academic_level = ? AND target_group IN (?) AND status != 'completed'`;
+        const params = [academicLevel, groupNames];
+
+        if (stageName) {
+            query += ` AND LOWER(TRIM(evaluation_type)) = LOWER(TRIM(?))`;
+            params.push(stageName);
+        }
+
+        const [result] = await db.promise().query(query, params);
+
+        return res.status(200).json({ success: true, panelsUpdated: result.affectedRows });
+    } catch (error) {
+        console.error('Database error (completePanelsForGroups):', error);
+        return res.status(500).json({ success: false, message: 'Failed to complete panels.' });
     }
 };
 
@@ -152,6 +234,7 @@ const getFrozenDates = async (req, res) => {
 module.exports = {
     scheduleEvaluationPanel,
     getUpcomingPanels,
+    completePanelsForGroups,
     deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,

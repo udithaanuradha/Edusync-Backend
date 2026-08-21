@@ -484,6 +484,9 @@ app.use("/api/groups", groupRoutes);
 const groupDetailsToSupervisorDashboardRoutes = require("./src/routes/groupDetailsToSupervisorDashboardRoutes");
 app.use("/api/groupdetailstosupervisordashboard", groupDetailsToSupervisorDashboardRoutes);
 
+const superviceStProgressRoutes = require("./src/routes/superviceStProgressRoutes");
+app.use("/api/supervice-st-progress", superviceStProgressRoutes);
+
 const calendarRoutes = require("./src/routes/calendarRoutes");
 app.use("/api/calendar", calendarRoutes);
 
