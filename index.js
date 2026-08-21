@@ -540,6 +540,10 @@ app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 const messageV2Routes = require("./src/routes/messageV2Routes");
 app.use("/api/v2/messages", messageV2Routes);
 
+// V2 Group Chat Routes (supervisor<->group, mentor<->group)
+const groupConversationV2Routes = require("./src/routes/groupConversationV2Routes");
+app.use("/api/v2/group-conversations", groupConversationV2Routes);
+
 app.use((err, req, res, next) => {
   console.error("Global Error Handler:", err);
   res.status(500).json({ success: false, error: err.message || "Internal server error" });
