@@ -128,6 +128,17 @@ const getStageById = (id, callback) => {
     db.query('SELECT * FROM project_stages WHERE stage_id = ?', [id], callback);
 };
 
+// A cleared link field can arrive as a whitespace-only string rather than ''
+// (e.g. a stray leftover space after backspacing/selecting), which is
+// truthy in JS — `linkValue ?? null` alone lets it through, gets stored as-is,
+// and then `stage.resource_links && (...)` on the frontend still renders the
+// "View attached resource" link, making the field look impossible to clear.
+// Trim first so whitespace-only collapses to null same as a fully empty value.
+const normalizeLinkValue = (value) => {
+    const trimmed = typeof value === 'string' ? value.trim() : value;
+    return trimmed || null;
+};
+
 const createStage = (data, callback) => {
     const {
         level,
@@ -139,7 +150,7 @@ const createStage = (data, callback) => {
         resource_link,
         mentor_details_url,
     } = data;
-    const linkValue = resource_links ?? resource_link ?? mentor_details_url ?? null;
+    const linkValue = normalizeLinkValue(resource_links ?? resource_link ?? mentor_details_url ?? null);
 
     ensureStageAcademicUnitColumn().then(() => {
         // Scope the stage to its creating coordinator's own degree program, so
@@ -164,33 +175,48 @@ const createStage = (data, callback) => {
 const deleteStage = (id, callback) => {
     console.log("=== 1. Starting delete process for Stage ID:", id, "===");
 
-    // First, try to delete the files
-    db.query('DELETE FROM stage_files WHERE stage_id = ?', [id], (err, results) => {
-        if (err) {
-            console.log("❌ DB ERROR CAUGHT IN STAGE_FILES TABLE:");
-            console.error(err); // <-- This will print the exact SQL error!
-            return callback(err);
+    // stage_files and student_submissions both cascade on stage_id automatically
+    // (fk_sf_stage / fk_submission_stage, ON DELETE CASCADE) — the explicit
+    // stage_files delete below is just belt-and-braces. `marks.stage_id`
+    // (fk_mark_stage) does NOT cascade though, so any stage that already has
+    // evaluation marks recorded against it must have them cleared first, or
+    // the final delete fails with ER_ROW_IS_REFERENCED_2 (same class of bug
+    // as groupController.deleteGroup had for fk_mark_group).
+    db.query('DELETE FROM marks WHERE stage_id = ?', [id], (marksErr) => {
+        if (marksErr) {
+            console.log("❌ DB ERROR CAUGHT IN MARKS TABLE:");
+            console.error(marksErr);
+            return callback(marksErr);
         }
 
-        console.log("=== 2. Files deleted (or none existed). Now deleting the stage... ===");
-        
-        // Then, try to delete the stage itself
-        db.query('DELETE FROM project_stages WHERE stage_id = ?', [id], (err2, results2) => {
-            if (err2) {
-                console.log("❌ DB ERROR CAUGHT IN PROJECT_STAGES TABLE:");
-                console.error(err2); // <-- This will print the exact SQL error!
-                return callback(err2);
+        // First, try to delete the files
+        db.query('DELETE FROM stage_files WHERE stage_id = ?', [id], (err, results) => {
+            if (err) {
+                console.log("❌ DB ERROR CAUGHT IN STAGE_FILES TABLE:");
+                console.error(err); // <-- This will print the exact SQL error!
+                return callback(err);
             }
-            
-            console.log("✅ Stage successfully deleted from both tables!");
-            callback(null, results2);
+
+            console.log("=== 2. Files deleted (or none existed). Now deleting the stage... ===");
+
+            // Then, try to delete the stage itself
+            db.query('DELETE FROM project_stages WHERE stage_id = ?', [id], (err2, results2) => {
+                if (err2) {
+                    console.log("❌ DB ERROR CAUGHT IN PROJECT_STAGES TABLE:");
+                    console.error(err2); // <-- This will print the exact SQL error!
+                    return callback(err2);
+                }
+
+                console.log("✅ Stage successfully deleted from both tables!");
+                callback(null, results2);
+            });
         });
     });
 };
 
 const updateStage = (id, data, callback) => {
     const { stage_name, description, deadline, resource_link, resource_links, mentor_details_url } = data;
-    const linkValue = resource_links ?? resource_link ?? mentor_details_url ?? null;
+    const linkValue = normalizeLinkValue(resource_links ?? resource_link ?? mentor_details_url ?? null);
     db.query(
         'UPDATE project_stages SET stage_name=?, description=?, deadline=?, resource_links=? WHERE stage_id=?',
         [stage_name, description, deadline || null, linkValue, id],
