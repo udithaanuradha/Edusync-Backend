@@ -11,20 +11,20 @@ const db = require('../config/db');
  * Stores evaluators as JSON text in the `evaluation_panels` table.
  */
 const scheduleEvaluationPanel = async (req, res) => {
-    const { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location } = req.body;
+    const { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location, meetingLink } = req.body;
 
     try {
         // Convert evaluators array/object into a JSON string for storage.
         const evaluatorsString = JSON.stringify(evaluators);
 
         const query = `
-            INSERT INTO evaluation_panels 
-            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO evaluation_panels
+            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location, meeting_link)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         // Use the promise wrapper on the pool to await the query result.
-        await db.promise().query(query, [evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location]);
+        await db.promise().query(query, [evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location, meetingLink || null]);
 
         // Respond with a success message on creation.
         res.status(201).json({ message: 'Evaluation panel scheduled successfully!' });

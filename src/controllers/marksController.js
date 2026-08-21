@@ -113,6 +113,7 @@ const submitMarks = async (req, res) => {
 const getLevelMarksSummary = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
+        const studentId = req.query.studentId ? Number(req.query.studentId) : null;
 
         // Fetch all project stages for this level
         const [rawStages] = await db.promise().query(
@@ -175,23 +176,33 @@ const getLevelMarksSummary = async (req, res) => {
             });
         }
 
-        // Fetch all marks for this level
-        const [allMarks] = await db.promise().query(
-            `SELECT 
-                m.mark_id,
-                m.group_id,
-                m.student_id,
-                m.stage_id,
-                m.marked_by,
-                m.marks_obtained,
-                m.total_marks,
-                m.feedback,
-                u.name AS evaluator_name
-             FROM marks m
-             JOIN users u ON u.id = m.marked_by
-             WHERE m.group_id IN (SELECT id FROM project_groups WHERE level = ?)`,
-            [level]
-        );
+        // Fetch all marks for this level. Scoped by stage_id (via the canonical
+        // stage list for this level), not group_id — a mark's group_id can go
+        // stale if the group is later deleted/recreated, but student_id and
+        // stage_id stay valid and are what the summary below actually matches
+        // against, so filtering on group existence here only hid real marks
+        // for no reason.
+        const stageIds = canonicalStages.flatMap((s) => s.stage_ids);
+
+        const [allMarks] = stageIds.length
+            ? await db.promise().query(
+                `SELECT
+                    m.mark_id,
+                    m.group_id,
+                    m.student_id,
+                    m.stage_id,
+                    m.marked_by,
+                    m.marks_obtained,
+                    m.total_marks,
+                    m.feedback,
+                    u.name AS evaluator_name,
+                    u.role AS evaluator_role
+                 FROM marks m
+                 JOIN users u ON u.id = m.marked_by
+                 WHERE m.stage_id IN (?)`,
+                [stageIds]
+              )
+            : [[]];
 
         // Build structured summary per student
         const summary = students.map((student) => {
@@ -218,6 +229,7 @@ const getLevelMarksSummary = async (req, res) => {
                         evaluator_count: marksForThisStage.length,
                         evaluators: marksForThisStage.map((sm) => ({
                             evaluator_name: sm.evaluator_name,
+                            evaluator_role: sm.evaluator_role || '',
                             mark: Number(sm.marks_obtained),
                             total_marks: Number(sm.total_marks) || stageTotal,
                             feedback: sm.feedback || ''
@@ -276,11 +288,13 @@ const getLevelMarksSummary = async (req, res) => {
             };
         });
 
+        const responseData = studentId ? summary.filter((s) => s.student_id === studentId) : summary;
+
         return res.json({
             success: true,
             level: level,
             stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })),
-            data: summary
+            data: responseData
         });
 
     } catch (error) {

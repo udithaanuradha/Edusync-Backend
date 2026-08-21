@@ -31,7 +31,17 @@ const createAnnouncement = (req, res) => {
     req.body.postedBy
   ) || 'System';
   
-  const authorId = req.body.author_id || req.user?.id || null;
+  // The coordinator form sends `coordinator_id` and the supervisor form sends
+  // `supervisor_id` (not `author_id`) — both were silently ignored before,
+  // so every coordinator/supervisor announcement was saved with
+  // author_id = NULL. Accept them as a fallback; `author_id` (what
+  // AdminAnnouncements.tsx already sends) still wins whenever it's present,
+  // so nothing already working changes.
+  const authorId = req.body.author_id
+    || req.body.coordinator_id
+    || req.body.supervisor_id
+    || req.user?.id
+    || null;
 
   if (!title || !message) {
     return res.status(400).json({ error: 'Title and message are required' });
@@ -159,11 +169,21 @@ const getAnnouncements = (req, res) => {
       params.push(currentUserId);
     }
 
-    let query = `SELECT * FROM announcements`;
+    // Join the author's current role/designation from `users` via author_id.
+    // Purely additive — two extra columns in the response, no change to any
+    // of the WHERE-clause filtering above, so every existing caller
+    // (AdminAnnouncements, the coordinator/supervisor Announcements
+    // components, AnnouncementWidget) keeps working exactly as before and
+    // just gets two fields it doesn't look at.
+    let query = `
+      SELECT announcements.*, author_u.role AS author_role, author_u.designation AS author_designation
+      FROM announcements
+      LEFT JOIN users author_u ON author_u.id = announcements.author_id
+    `;
     if (whereConditions.length > 0) {
       query += ` WHERE ` + whereConditions.join(' AND ');
     }
-    query += ` ORDER BY created_at DESC`;
+    query += ` ORDER BY announcements.created_at DESC`;
 
     console.log('[getAnnouncements] Query:', query, 'Params:', params);
 

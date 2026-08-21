@@ -16,8 +16,10 @@ const createSubmission = async (req, res) => {
   }
 
   const files = Array.isArray(req.files) ? req.files : [];
-  if (files.length === 0) {
-    return res.status(400).json({ success: false, message: 'At least one file is required' });
+  const submissionLink = (req.body?.submission_link || '').trim() || null;
+
+  if (files.length === 0 && !submissionLink) {
+    return res.status(400).json({ success: false, message: 'Attach at least one file or a link' });
   }
 
   try {
@@ -40,7 +42,7 @@ const createSubmission = async (req, res) => {
       fileUrls.push(fileUrl);
     }
 
-    if (fileUrls.length === 0) {
+    if (files.length > 0 && fileUrls.length === 0) {
       return res.status(500).json({ success: false, message: 'No valid file URLs were generated from uploads' });
     }
 
@@ -49,11 +51,11 @@ const createSubmission = async (req, res) => {
     const filePathsValue = JSON.stringify(fileUrls);
 
     const sql = `
-      INSERT INTO student_submissions (stage_id, student_id, file_paths, submitted_at, status)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO student_submissions (stage_id, student_id, file_paths, submitted_at, status, submission_link)
+      VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(sql, [stageId, studentId, filePathsValue, submittedAt, status], (err, result) => {
+    db.query(sql, [stageId, studentId, filePathsValue, submittedAt, status, submissionLink], (err, result) => {
       if (err) {
         console.error('Submission insert failed:', err.message);
         if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.code === 'ER_NO_REFERENCED_ROW') {
@@ -81,15 +83,10 @@ const updateSubmission = async (req, res) => {
     return res.status(400).json({ success: false, message: 'submissionId and student_id are required' });
   }
 
-  const files = Array.isArray(req.files) ? req.files : [];
-  if (files.length === 0) {
-    return res.status(400).json({ success: false, message: 'At least one file is required' });
-  }
-
   try {
     // Ownership check — only the original uploader may update their own submission
     const [existingRows] = await db.promise().query(
-      'SELECT student_id FROM student_submissions WHERE submission_id = ?',
+      'SELECT student_id, file_paths, submission_link FROM student_submissions WHERE submission_id = ?',
       [submissionId],
     );
 
@@ -101,28 +98,47 @@ const updateSubmission = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You can only update your own submission' });
     }
 
-    const uploadFolder = process.env.CLOUDINARY_STUDENT_SUBMISSION_FOLDER || process.env.CLOUDINARY_SUBMISSION_FOLDER || 'student-submissions';
-    const fileUrls = [];
+    const files = Array.isArray(req.files) ? req.files : [];
+    const linkProvided = Object.prototype.hasOwnProperty.call(req.body || {}, 'submission_link');
+    const submissionLink = linkProvided ? (req.body.submission_link || '').trim() || null : undefined;
 
-    for (const file of files) {
-      if (!file?.buffer) {
-        return res.status(400).json({ success: false, message: 'Each uploaded file must include file data' });
+    let filePathsValue = existingRows[0].file_paths;
+
+    if (files.length > 0) {
+      const uploadFolder = process.env.CLOUDINARY_STUDENT_SUBMISSION_FOLDER || process.env.CLOUDINARY_SUBMISSION_FOLDER || 'student-submissions';
+      const fileUrls = [];
+
+      for (const file of files) {
+        if (!file?.buffer) {
+          return res.status(400).json({ success: false, message: 'Each uploaded file must include file data' });
+        }
+        const result = await uploadBufferToCloudinary(file.buffer, file.originalname, uploadFolder);
+        const fileUrl = result.secure_url || result.url || (result.public_id ? cloudinary.url(result.public_id, { resource_type: 'auto' }) : null);
+        if (!fileUrl) {
+          throw new Error('Cloudinary upload succeeded but no URL was returned');
+        }
+        fileUrls.push(fileUrl);
       }
-      const result = await uploadBufferToCloudinary(file.buffer, file.originalname, uploadFolder);
-      const fileUrl = result.secure_url || result.url || (result.public_id ? cloudinary.url(result.public_id, { resource_type: 'auto' }) : null);
-      if (!fileUrl) {
-        throw new Error('Cloudinary upload succeeded but no URL was returned');
-      }
-      fileUrls.push(fileUrl);
+
+      filePathsValue = JSON.stringify(fileUrls);
     }
 
     const submittedAt = new Date().toISOString();
     const status = calculateSubmissionStatus(submittedAt, req.body.deadline || null);
-    const filePathsValue = JSON.stringify(fileUrls);
+
+    const setClauses = ['file_paths = ?', 'submitted_at = ?', 'status = ?'];
+    const values = [filePathsValue, submittedAt, status];
+
+    if (submissionLink !== undefined) {
+      setClauses.push('submission_link = ?');
+      values.push(submissionLink);
+    }
+
+    values.push(submissionId, studentId);
 
     db.query(
-      'UPDATE student_submissions SET file_paths = ?, submitted_at = ?, status = ? WHERE submission_id = ? AND student_id = ?',
-      [filePathsValue, submittedAt, status, submissionId, studentId],
+      `UPDATE student_submissions SET ${setClauses.join(', ')} WHERE submission_id = ? AND student_id = ?`,
+      values,
       (err, result) => {
         if (err) {
           return res.status(500).json({ success: false, message: 'Submission could not be updated', error: err.message });
@@ -130,7 +146,7 @@ const updateSubmission = async (req, res) => {
         if (result.affectedRows === 0) {
           return res.status(404).json({ success: false, message: 'Submission not found' });
         }
-        res.json({ success: true, message: 'Submission updated successfully', file_paths: fileUrls });
+        res.json({ success: true, message: 'Submission updated successfully' });
       },
     );
   } catch (uploadErr) {
