@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const redisConfig = require('../config/redis');
 const MessageV2Model = require('../models/MessageV2Model');
 const GroupConversationV2Model = require('../models/GroupConversationV2Model');
+const { canMessage } = require('../utils/chatPermissionsV2');
 
 const groupConversationRoom = (conversationId) => `room:conversation_${conversationId}`;
 
@@ -110,6 +111,11 @@ function setupSocketV2(httpServer, corsOptions = {}) {
         const { receiver_id, message_text } = payload;
         if (!receiver_id || !message_text?.trim()) {
           if (typeof callback === 'function') callback({ success: false, error: 'Invalid payload' });
+          return;
+        }
+
+        if (!(await canMessage(userId, parseInt(receiver_id, 10)))) {
+          if (typeof callback === 'function') callback({ success: false, error: 'You are not allowed to message this user.' });
           return;
         }
 
