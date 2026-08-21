@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const PDFDocument = require('pdfkit');
 
 const getCoordinatorSubmissionTracking = async (req, res) => {
   try {
@@ -109,11 +110,12 @@ const submitMarks = async (req, res) => {
 
 /**
  * Marks Aggregation: Evaluators -> Stage Marks (Average) -> Final Mark {(Total Obtained / Total Max) * 100}%
+ * Shared by getLevelMarksSummary (JSON, used by the Reports/Gradebook UI) and
+ * downloadMarksDistributionPdf (PDF report) so both stay consistent — pulled
+ * out as a plain data function (no req/res) rather than duplicating the
+ * aggregation logic in the PDF handler.
  */
-const getLevelMarksSummary = async (req, res) => {
-    try {
-        const level = Number(req.params.level || 2);
-
+const computeLevelMarksSummary = async (level) => {
         // Fetch all project stages for this level
         const [rawStages] = await db.promise().query(
             `SELECT stage_id, stage_name, description, deadline FROM project_stages WHERE level = ? ORDER BY stage_id ASC`,
@@ -168,11 +170,10 @@ const getLevelMarksSummary = async (req, res) => {
         );
 
         if (students.length === 0) {
-            return res.json({ 
-                success: true, 
-                stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })), 
-                data: [] 
-            });
+            return {
+                stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })),
+                data: []
+            };
         }
 
         // Fetch all marks for this level
@@ -276,22 +277,187 @@ const getLevelMarksSummary = async (req, res) => {
             };
         });
 
-        return res.json({
-            success: true,
-            level: level,
+        return {
             stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })),
             data: summary
-        });
+        };
+};
 
+/**
+ * GET /api/marks/summary/level/:level — JSON wrapper around
+ * computeLevelMarksSummary, used by the Reports/Gradebook UI.
+ */
+const getLevelMarksSummary = async (req, res) => {
+    try {
+        const level = Number(req.params.level || 2);
+        const { stages, data } = await computeLevelMarksSummary(level);
+        return res.json({ success: true, level, stages, data });
     } catch (error) {
         console.error('Error fetching level marks summary:', error);
         return res.status(500).json({ success: false, message: 'Failed to fetch marks summary', error: error.message });
     }
 };
 
-module.exports = { 
-    getStageMarks, 
-    submitMarks, 
+/**
+ * GET /api/marks/report/level/:level/pdf
+ * Streams a PDF "Marks Distribution Report" for a level: summary stats
+ * (mean/median/std-dev/pass rate) plus a histogram of final marks with a
+ * normal-distribution (bell curve) overlay fitted to that mean/std-dev.
+ * Drawn directly with PDFKit's vector primitives (rect/line/bezier) rather
+ * than a charting library + canvas — see the chat discussion for why:
+ * avoids a native `canvas` dependency and headless-Chromium (Puppeteer)
+ * entirely, which matters for a small Node/Express backend like this one.
+ * No chart is ever rendered in the React UI — this is the only place the
+ * distribution is visualized, by design.
+ */
+const downloadMarksDistributionPdf = async (req, res) => {
+    try {
+        const level = Number(req.params.level || 2);
+        const { data: students } = await computeLevelMarksSummary(level);
+
+        const marks = students
+            .map((s) => Number(s.final_mark))
+            .filter((m) => Number.isFinite(m));
+
+        const n = marks.length;
+        const mean = n > 0 ? marks.reduce((a, b) => a + b, 0) / n : 0;
+        const variance = n > 0 ? marks.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0;
+        const stdDev = Math.sqrt(variance);
+        const sorted = [...marks].sort((a, b) => a - b);
+        const median = n === 0
+            ? 0
+            : n % 2 === 0
+                ? (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+                : sorted[(n - 1) / 2];
+        // 35% matches the 'I' (incomplete/fail) cutoff already used for pass
+        // rate on the Reports tab (SupervisorReportPanel.tsx's GRADING_SCALE).
+        const passCount = marks.filter((m) => m >= 35).length;
+        const passRate = n > 0 ? (passCount / n) * 100 : 0;
+
+        // Histogram: 10-point buckets, 0-9 ... 90-100 (100 folds into the last bucket).
+        const bucketSize = 10;
+        const bucketCount = 10;
+        const buckets = new Array(bucketCount).fill(0);
+        marks.forEach((m) => {
+            const idx = Math.min(bucketCount - 1, Math.max(0, Math.floor(m / bucketSize)));
+            buckets[idx] += 1;
+        });
+        const maxBucketCount = Math.max(...buckets, 1);
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="Level_${level}_Marks_Distribution_Report.pdf"`);
+
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        doc.pipe(res);
+
+        // ---- Header ----
+        doc.fontSize(20).font('Helvetica-Bold').text(`Level ${level} — Marks Distribution Report`, { align: 'center' });
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').fillColor('#666666')
+            .text(`Generated on ${new Date().toLocaleString()}`, { align: 'center' });
+        doc.fillColor('#000000');
+        doc.moveDown(1.5);
+
+        // ---- Summary stats ----
+        doc.fontSize(12).font('Helvetica-Bold').text('Summary');
+        doc.moveDown(0.4);
+        doc.fontSize(10).font('Helvetica');
+        [
+            `Total Students: ${n}`,
+            `Mean: ${mean.toFixed(2)}%`,
+            `Median: ${median.toFixed(2)}%`,
+            `Standard Deviation: ${stdDev.toFixed(2)}`,
+            `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
+        ].forEach((line) => doc.text(line));
+        doc.moveDown(1.5);
+
+        // ---- Chart: histogram bars + bell curve overlay ----
+        doc.fontSize(12).font('Helvetica-Bold').text('Marks Distribution');
+        doc.moveDown(0.5);
+
+        const chartX = doc.page.margins.left;
+        const chartTop = doc.y;
+        const chartWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+        const chartHeight = 250;
+        const plotHeight = chartHeight - 20; // headroom so the tallest bar/curve peak isn't flush with the top
+
+        const gaussianDensity = (x) =>
+            stdDev > 0.001
+                ? (1 / (stdDev * Math.sqrt(2 * Math.PI))) * Math.exp(-0.5 * ((x - mean) / stdDev) ** 2)
+                : 0;
+        const drawCurve = stdDev > 0.001 && n > 1;
+
+        // Bars and the bell curve share one vertical scale so neither clips —
+        // a tight cluster of marks (small stdDev) produces a curve peak far
+        // taller than any single bar, so the scale must be based on whichever
+        // is larger, not the bars alone.
+        const curvePeak = drawCurve ? gaussianDensity(mean) * bucketSize * n : 0;
+        const plotMax = Math.max(maxBucketCount, curvePeak, 1);
+
+        // Axes
+        doc.strokeColor('#333333').lineWidth(1);
+        doc.moveTo(chartX, chartTop).lineTo(chartX, chartTop + chartHeight).stroke();
+        doc.moveTo(chartX, chartTop + chartHeight).lineTo(chartX + chartWidth, chartTop + chartHeight).stroke();
+
+        // Bars
+        const bucketWidth = chartWidth / bucketCount;
+        const barGap = 4;
+        buckets.forEach((count, i) => {
+            const barHeight = (count / plotMax) * plotHeight;
+            const barX = chartX + i * bucketWidth + barGap / 2;
+            const barY = chartTop + chartHeight - barHeight;
+            doc.rect(barX, barY, bucketWidth - barGap, barHeight).fill('#93c5fd');
+        });
+
+        // X-axis bucket labels
+        doc.fillColor('#333333').fontSize(7).font('Helvetica');
+        buckets.forEach((_, i) => {
+            const label = i === bucketCount - 1 ? '90-100' : `${i * 10}-${i * 10 + 9}`;
+            doc.text(label, chartX + i * bucketWidth, chartTop + chartHeight + 4, { width: bucketWidth, align: 'center' });
+        });
+
+        // Bell curve: normal distribution fitted to mean/stdDev, scaled to the
+        // same "expected count per bucket" axis as the histogram bars (via
+        // plotMax above) so the two are visually comparable and neither clips.
+        if (drawCurve) {
+            const steps = 100;
+            const points = [];
+            for (let i = 0; i <= steps; i += 1) {
+                const x = (i / steps) * 100;
+                const expectedCount = gaussianDensity(x) * bucketSize * n;
+                const plotX = chartX + (x / 100) * chartWidth;
+                const plotY = chartTop + chartHeight - (expectedCount / plotMax) * plotHeight;
+                points.push([plotX, plotY]);
+            }
+
+            doc.strokeColor('#dc2626').lineWidth(2);
+            doc.moveTo(points[0][0], points[0][1]);
+            points.slice(1).forEach(([x, y]) => doc.lineTo(x, y));
+            doc.stroke();
+        }
+
+        // Legend
+        const legendY = chartTop + chartHeight + 26;
+        doc.rect(chartX, legendY, 10, 10).fill('#93c5fd');
+        doc.fillColor('#333333').fontSize(9).font('Helvetica').text('Number of students', chartX + 16, legendY - 1);
+        doc.moveTo(chartX, legendY + 20).lineTo(chartX + 10, legendY + 20).strokeColor('#dc2626').lineWidth(2).stroke();
+        doc.fillColor('#333333').text('Normal distribution (bell curve) fit', chartX + 16, legendY + 15);
+
+        doc.end();
+    } catch (error) {
+        console.error('Error generating marks distribution PDF:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, message: 'Failed to generate PDF report', error: error.message });
+        } else {
+            res.end();
+        }
+    }
+};
+
+module.exports = {
+    getStageMarks,
+    submitMarks,
     getCoordinatorSubmissionTracking,
     getLevelMarksSummary,
+    downloadMarksDistributionPdf,
 };

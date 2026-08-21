@@ -215,7 +215,25 @@ const getUserProfile = async (req, res) => {
          LIMIT 1`,
         [requesterId, targetId]
       );
+
+      // Not a shared-member match — also allow a requester to view the
+      // supervisor or mentor assigned to their own group (still scoped to
+      // groups the requester actually belongs to, never an arbitrary
+      // supervisor/mentor outside of it).
+      let isOwnGroupSupervisorOrMentor = false;
       if (shared.length === 0) {
+        const [assigned] = await dbPromise.query(
+          `SELECT 1
+           FROM project_group_members gm
+           JOIN project_groups pg ON pg.id = gm.group_id
+           WHERE gm.student_id = ? AND (pg.supervisor_id = ? OR pg.mentor_id = ?)
+           LIMIT 1`,
+          [requesterId, targetId, targetId]
+        );
+        isOwnGroupSupervisorOrMentor = assigned.length > 0;
+      }
+
+      if (shared.length === 0 && !isOwnGroupSupervisorOrMentor) {
         return res.status(403).json({ success: false, error: 'Access denied. You do not share a group with this user.' });
       }
     }
@@ -230,7 +248,20 @@ const getUserProfile = async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
-    res.status(200).json({ success: true, data: rows[0] });
+    // project_group_members only has student rows, so this naturally comes
+    // back empty for a supervisor/mentor profile — a student can belong to
+    // more than one group (e.g. across levels), so this returns all of them
+    // rather than assuming exactly one.
+    const [groupRows] = await dbPromise.query(
+      `SELECT pg.id AS group_id, pg.group_name, pg.level
+       FROM project_group_members gm
+       JOIN project_groups pg ON pg.id = gm.group_id
+       WHERE gm.student_id = ?
+       ORDER BY pg.level ASC`,
+      [targetId]
+    );
+
+    res.status(200).json({ success: true, data: { ...rows[0], groups: groupRows } });
   } catch (err) {
     console.error('Error fetching user profile:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch profile.' });
