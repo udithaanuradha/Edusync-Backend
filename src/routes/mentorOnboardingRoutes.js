@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const { sendMentorInviteEmail } = require('../config/emailConfig');
+const { validatePassword } = require('../utils/validators');
 
 // 1. PREVIEW EXCEL DETAILS WITH ACTIVE GROUPS FOR SPECIFIC LEVEL
 router.post('/preview-upload', (req, res) => {
@@ -82,6 +83,10 @@ router.post('/finalize-setup', (req, res) => {
 
   if (!token || !username || !password) {
     return res.status(400).json({ error: "All account setup fields are required." });
+  }
+
+  if (!validatePassword(password)) {
+    return res.status(400).json({ error: "Password must be at least 8 characters and include uppercase, lowercase, number, and special character." });
   }
 
   try {

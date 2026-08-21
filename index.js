@@ -89,44 +89,77 @@ app.post('/api/signup', async (req, res) => {
   let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
 
   // Basic backend-side validation using central validator
-  // Note: `department` here is validated only for role === 'student' (see
-  // validators.js) — academic_unit doubles as a lecturer's own department
-  // (a different value domain), which this validation deliberately ignores.
-  const validationResult = validateUserCreation({ firstName, lastName, email, password, role, universityId: university_id, department: academic_unit });
+  const validationResult = validateUserCreation({ firstName, lastName, email, phone, password, role, universityId: university_id, department: academic_unit });
   if (!validationResult.valid) {
-    return res.status(400).json({ error: 'Validation failed', details: validationResult.errors });
+    return res.status(400).json({ error: 'Validation failed', details: validationResult.errors, message: validationResult.errors[0] });
   }
 
-  const name = `${firstName.trim()} ${lastName.trim()}`.trim();
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanUniId = university_id ? university_id.trim().toUpperCase() : null;
 
-  // Level applies to students only; lecturers are supervisors by default.
-  const levelValue = role === 'student' ? 1 : null;
-  const designationValue = role === 'lecturer' ? 'supervisor' : null;
-  const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  // Check 1: Duplicate Email Check
+  db.query("SELECT id FROM users WHERE LOWER(TRIM(email)) = ?", [cleanEmail], (emailErr, emailRows) => {
+    if (emailErr) return res.status(500).json({ error: emailErr.message });
+    if (emailRows.length > 0) {
+      return res.status(400).json({ error: 'This email address is already registered. Please login or use a different email.' });
+    }
 
-  db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue], async (err, result) => {
-    if (err) return res.status(500).json({ error: err.message });
+    // Check 2: Duplicate University ID Check (for students)
+    if (role === 'student' && cleanUniId) {
+      db.query("SELECT id FROM users WHERE UPPER(TRIM(university_id)) = ?", [cleanUniId], (uniErr, uniRows) => {
+        if (uniErr) return res.status(500).json({ error: uniErr.message });
+        if (uniRows.length > 0) {
+          return res.status(400).json({ error: 'This University ID is already registered. Please login or check your ID.' });
+        }
 
-    const newUserId = result.insertId; 
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
-
-    // Insert into your otp_verifications table using the newly generated user ID integer
-    const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
-    db.query(otpSql, [newUserId, otpCode, expiresAt], async (otpErr, otpResult) => {
-      if (otpErr) return res.status(500).json({ error: otpErr.message });
-
-      try {
-        console.log(`📧 Sending OTP to ${email}`);
-        await sendOtpEmail(email, otpCode);
-        console.log(`✅ OTP email sent to ${email}`);
-        return res.status(200).json({ success: true, message: "User registered. OTP sent!" });
-      } catch (mailErr) {
-        console.error('❌ Failed to send OTP email:', mailErr);
-        return res.status(500).json({ error: 'User created but OTP email could not be sent.', details: mailErr.message });
-      }
-    });
+        proceedWithUserInsert();
+      });
+    } else {
+      proceedWithUserInsert();
+    }
   });
+
+  function proceedWithUserInsert() {
+    const name = `${firstName.trim()} ${lastName.trim()}`.trim();
+    const levelValue = role === 'student' ? 1 : null;
+    const designationValue = role === 'lecturer' ? 'supervisor' : null;
+    const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+    db.query(userSql, [name, cleanEmail, password, role, cleanUniId, phone || null, academic_unit || null, levelValue, designationValue], async (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY' || err.message.includes('Duplicate')) {
+          if (err.message.includes('email') || err.message.includes('key 2') || err.message.includes('users.email')) {
+            return res.status(400).json({ error: 'This email address is already registered. Please login or use a different email.' });
+          }
+          if (err.message.includes('university_id') || err.message.includes('users.university_id')) {
+            return res.status(400).json({ error: 'This University ID is already registered. Please login or check your ID.' });
+          }
+          return res.status(400).json({ error: 'Account with these details already exists. Please login instead.' });
+        }
+        return res.status(500).json({ error: err.message });
+      }
+
+      const newUserId = result.insertId; 
+      const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
+
+      // Insert into otp_verifications table
+      const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
+      db.query(otpSql, [newUserId, otpCode, expiresAt], async (otpErr, otpResult) => {
+        if (otpErr) return res.status(500).json({ error: otpErr.message });
+
+        try {
+          console.log(`📧 Sending OTP to ${cleanEmail}`);
+          await sendOtpEmail(cleanEmail, otpCode);
+          console.log(`✅ OTP email sent to ${cleanEmail}`);
+          return res.status(200).json({ success: true, message: "User registered. OTP sent!" });
+        } catch (mailErr) {
+          console.error('❌ Failed to send OTP email:', mailErr);
+          return res.status(500).json({ error: 'User created but OTP email could not be sent.', details: mailErr.message });
+        }
+      });
+    });
+  }
 });
 
 app.post('/api/verify-otp', (req, res) => {
