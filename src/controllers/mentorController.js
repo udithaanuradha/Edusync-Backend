@@ -553,12 +553,93 @@ exports.getMentorGroupTasks = async (req, res) => {
 exports.saveMentorTaskFeedback = async (req, res) => {
   const { taskId } = req.params;
   const { feedback, mentor_feedback } = req.body;
-  const fbText = mentor_feedback || feedback || '';
+  const fbText = (mentor_feedback || feedback || '').trim();
+  const mentorId = req.user?.id || req.headers['x-user-id'] || null;
+
   try {
+    // 1. Save mentor feedback into student_tasks database table
     await queryWithRetry(
       'UPDATE student_tasks SET mentor_feedback = ? WHERE id = ?',
       [fbText, taskId]
     );
+
+    // 2. Automatically sync feedback as a 1-on-1 Direct Message to the assigned student
+    if (fbText) {
+      try {
+        const [taskRows] = await queryWithRetry(
+          `SELECT st.id, st.task_name, st.assigned_to, m.id AS milestone_id, m.title AS milestone_title,
+                  m.group_id, u.name AS student_name, pg.mentor_id, pg.group_name
+           FROM student_tasks st
+           JOIN milestones m ON m.id = st.milestone_id
+           JOIN project_groups pg ON pg.id = m.group_id
+           LEFT JOIN users u ON u.id = st.assigned_to
+           WHERE st.id = ?`,
+          [taskId]
+        );
+
+        if (taskRows && taskRows.length > 0) {
+          const task = taskRows[0];
+          const senderId = mentorId || task.mentor_id;
+
+          if (senderId) {
+            const MessageV2Model = require('../models/MessageV2Model');
+
+            // Format message containing only Task, Milestone, and Feedback
+            const messageLines = [
+              `📝 [Mentor Task Feedback]`,
+              `📌 Task: ${task.task_name || 'Untitled Task'}`,
+            ];
+
+            if (task.milestone_title) {
+              messageLines.push(`🎯 Milestone: ${task.milestone_title}`);
+            }
+
+            messageLines.push(`💬 Feedback: ${fbText}`);
+
+            const messageText = messageLines.join('\n');
+
+            // Remove any previous feedback message for this task to avoid duplicates
+            try {
+              const taskPattern = `%Task: ${task.task_name}%`;
+              const taskQuotedPattern = `%Task: "${task.task_name}"%`;
+              if (task.assigned_to) {
+                await queryWithRetry(
+                  `DELETE FROM messages_v2 
+                   WHERE sender_id = ? AND receiver_id = ? 
+                     AND (message_text LIKE ? OR message_text LIKE ?)`,
+                  [senderId, task.assigned_to, taskPattern, taskQuotedPattern]
+                );
+              }
+            } catch (delOldErr) {
+              console.warn('Old feedback message cleanup warning:', delOldErr.message);
+            }
+
+            if (task.assigned_to) {
+              // Direct 1-on-1 message to the assigned student only
+              await MessageV2Model.saveMessage({
+                sender_id: Number(senderId),
+                receiver_id: Number(task.assigned_to),
+                message_text: messageText,
+              });
+            } else if (task.group_id) {
+              // Fallback to group chat only if task is unassigned
+              const GroupConversationV2Model = require('../models/GroupConversationV2Model');
+              const convId = await GroupConversationV2Model.ensureGroupConversation(task.group_id, 'mentor');
+              if (convId) {
+                await GroupConversationV2Model.saveMessage(
+                  convId,
+                  Number(senderId),
+                  messageText
+                );
+              }
+            }
+          }
+        }
+      } catch (chatSyncErr) {
+        console.warn('⚠️ [Mentor Feedback -> Student Direct Message Sync Warning]:', chatSyncErr.message);
+      }
+    }
+
     res.json({ success: true, message: 'Feedback saved successfully.' });
   } catch (err) {
     console.error('saveMentorTaskFeedback error:', err);
@@ -568,11 +649,58 @@ exports.saveMentorTaskFeedback = async (req, res) => {
 
 exports.clearMentorTaskFeedback = async (req, res) => {
   const { taskId } = req.params;
+  const mentorId = req.user?.id || req.headers['x-user-id'] || null;
+
   try {
+    // 1. Fetch task details to identify assigned student and task name
+    const [taskRows] = await queryWithRetry(
+      `SELECT st.id, st.task_name, st.assigned_to, m.group_id, pg.mentor_id
+       FROM student_tasks st
+       JOIN milestones m ON m.id = st.milestone_id
+       JOIN project_groups pg ON pg.id = m.group_id
+       WHERE st.id = ?`,
+      [taskId]
+    );
+
+    // 2. Clear mentor_feedback in student_tasks table
     await queryWithRetry(
       'UPDATE student_tasks SET mentor_feedback = NULL WHERE id = ?',
       [taskId]
     );
+
+    // 3. Automatically delete the feedback message from Communication (V2) chat
+    if (taskRows && taskRows.length > 0) {
+      const task = taskRows[0];
+      const senderId = mentorId || task.mentor_id;
+
+      try {
+        const taskPattern = `%Task: ${task.task_name}%`;
+        const taskQuotedPattern = `%Task: "${task.task_name}"%`;
+
+        if (senderId && task.assigned_to) {
+          // Delete from 1-on-1 direct messages with the student
+          await queryWithRetry(
+            `DELETE FROM messages_v2 
+             WHERE sender_id = ? AND receiver_id = ? 
+               AND (message_text LIKE ? OR message_text LIKE ?)`,
+            [senderId, task.assigned_to, taskPattern, taskQuotedPattern]
+          );
+        }
+
+        // Clean up from group conversation if any was posted there
+        if (senderId && task.group_id) {
+          await queryWithRetry(
+            `DELETE FROM messages_v2 
+             WHERE sender_id = ? 
+               AND (message_text LIKE ? OR message_text LIKE ?)`,
+            [senderId, taskPattern, taskQuotedPattern]
+          );
+        }
+      } catch (chatDelErr) {
+        console.warn('⚠️ [Mentor Feedback -> Message Delete Sync Warning]:', chatDelErr.message);
+      }
+    }
+
     res.json({ success: true, message: 'Feedback cleared successfully.' });
   } catch (err) {
     console.error('clearMentorTaskFeedback error:', err);
