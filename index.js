@@ -496,9 +496,6 @@ app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 const supervisorTaskRoutes = require("./src/routes/supervisorTaskRoutes");
 app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 
-const messageRoutes = require("./src/routes/messageRoutes");
-app.use("/api/messages", messageRoutes);
-
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
@@ -539,6 +536,10 @@ app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 // V2 Real-time Chat Routes
 const messageV2Routes = require("./src/routes/messageV2Routes");
 app.use("/api/v2/messages", messageV2Routes);
+
+// V2 Group Chat Routes (supervisor<->group, mentor<->group)
+const groupConversationV2Routes = require("./src/routes/groupConversationV2Routes");
+app.use("/api/v2/group-conversations", groupConversationV2Routes);
 
 app.use((err, req, res, next) => {
   console.error("Global Error Handler:", err);

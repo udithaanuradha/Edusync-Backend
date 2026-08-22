@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { canMessage } = require('../utils/chatPermissionsV2');
 
 class MessageV2Model {
   static async initTable() {
@@ -179,7 +180,11 @@ class MessageV2Model {
     sql += ` ORDER BY name ASC LIMIT 100`;
 
     const [rows] = await connection.query(sql, params);
-    return rows;
+
+    // Only surface people the current user is actually allowed to message —
+    // see chatPermissionsV2.js for the role-based rules.
+    const permitted = await Promise.all(rows.map((r) => canMessage(currentUserId, r.id)));
+    return rows.filter((_, idx) => permitted[idx]);
   }
 }
 
