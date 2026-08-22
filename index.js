@@ -319,9 +319,6 @@ app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 const supervisorTaskRoutes = require("./src/routes/supervisorTaskRoutes");
 app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 
-const messageRoutes = require("./src/routes/messageRoutes");
-app.use("/api/messages", messageRoutes);
-
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
