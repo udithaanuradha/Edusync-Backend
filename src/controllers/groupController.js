@@ -310,9 +310,20 @@ const getCoordinatorApprovedRequests = async (req, res) => {
   const rawLevel = req.query.level;
   const level = rawLevel === undefined ? null : Number(rawLevel);
   const finalOnly = String(req.query.finalOnly || '0') === '1' ? 1 : 0;
+  const coordinatorId = req.query.coordinatorId ? Number(req.query.coordinatorId) : null;
 
   try {
     await ensureRequestLifecycleColumns();
+
+    // Scope results to the requesting coordinator's own department so
+    // requests aren't shared across every coordinator at a level. If
+    // coordinatorId is missing/unresolved, coordinatorDepartment stays null
+    // and the added WHERE condition below passes through unfiltered.
+    let coordinatorDepartment = null;
+    if (coordinatorId) {
+      const [coordRows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
+      coordinatorDepartment = coordRows[0]?.academic_unit || null;
+    }
 
     // Build the WHERE clause dynamically
     let whereCondition = `gr.status = 'approved'
@@ -320,8 +331,9 @@ const getCoordinatorApprovedRequests = async (req, res) => {
            SELECT 1 FROM project_groups pg WHERE pg.id = gr.created_group_id
          ))
          AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
-         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)`;
-    let params = [finalOnly, level, level];
+         AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)
+         AND (? IS NULL OR student.academic_unit = ?)`;
+    let params = [finalOnly, level, level, coordinatorDepartment, coordinatorDepartment];
 
     const [rows] = await dbPromise.query(
       `SELECT gr.*, student.name AS student_name, student.level AS student_level,
@@ -761,8 +773,10 @@ const getGroupMembers = async (req, res) => {
  */
 const getSupervisors = async (req, res) => {
   try {
+    // academic_unit added so the Schedule Panel evaluator picker
+    // (CalendarPage.tsx) can group supervisors by department (IT/CM/ITM).
     const [results] = await dbPromise.query(
-      `SELECT id, name FROM users
+      `SELECT id, name, email, academic_unit FROM users
        WHERE role = 'supervisor' OR (role = 'lecturer' AND designation = 'supervisor')
        ORDER BY name ASC`
     );
@@ -876,10 +890,51 @@ const createGroupRequest = async (req, res) => {
           hasLiveCreatedGroup = liveGroupRows.length > 0;
         }
 
-        const staleRequestState = previous.status !== 'rejected' && (
+        // The UI sends ONE supervisor per "Request" button click (two
+        // buttons total). While the previous request is still 'pending',
+        // a second call here means the student is requesting their SECOND
+        // supervisor slot, not duplicating the first — append the new
+        // supervisor onto the SAME request instead of wiping it out, so
+        // both stay tracked together and both must approve.
+        if (previous.status === 'pending') {
+          const [existingSupRows] = await conn.query(
+            `SELECT supervisor_id FROM group_request_supervisors WHERE request_id = ? FOR UPDATE`,
+            [previous.request_id]
+          );
+          const alreadyTargeted = new Set(existingSupRows.map((r) => Number(r.supervisor_id)));
+          const newSupervisorIds = [...new Set(supervisorIds.map(Number))].filter(
+            (id) => !alreadyTargeted.has(id)
+          );
+
+          if (newSupervisorIds.length === 0) {
+            await conn.rollback();
+            conn.release();
+            return res.status(400).json({ error: 'You have already sent a request to this supervisor.' });
+          }
+          if (alreadyTargeted.size + newSupervisorIds.length > 2) {
+            await conn.rollback();
+            conn.release();
+            return res.status(400).json({ error: 'A maximum of 2 supervisors can be requested per group.' });
+          }
+
+          const newSupervisorRows = newSupervisorIds.map((id) => [previous.request_id, id, 'pending']);
+          await conn.query(
+            `INSERT INTO group_request_supervisors (request_id, supervisor_id, status) VALUES ?`,
+            [newSupervisorRows]
+          );
+
+          await conn.commit();
+          return res.status(201).json({
+            message: 'Request Sent',
+            groupId: previous.request_id,
+            request_id: previous.request_id,
+          });
+        }
+
+        const staleRequestState =
+          previous.status === 'rejected' ||
           Number(previous.is_group_created || 0) === 0 ||
-          !hasLiveCreatedGroup
-        );
+          !hasLiveCreatedGroup;
 
         if (!staleRequestState) {
           await conn.rollback();
@@ -887,7 +942,7 @@ const createGroupRequest = async (req, res) => {
           return res.status(400).json({ error: `You already have a ${previous.status} request for this level.` });
         }
 
-        // Reuse the stale request row after a deleted group or an old created flag.
+        // Reuse the stale request row after a rejection, a deleted group, or an old created flag.
         requestId = previous.request_id;
         await conn.query(
           `UPDATE group_requests
@@ -905,6 +960,12 @@ const createGroupRequest = async (req, res) => {
           [group_name, members_list, request_message, student_id, project_level]
         );
         requestId = result.insertId;
+      }
+
+      if (supervisorIds.length > 2) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ error: 'A maximum of 2 supervisors can be requested per group.' });
       }
 
       const supervisorRows = [...new Set(supervisorIds.map(Number))].map((id) => [requestId, id, 'pending']);
@@ -959,6 +1020,15 @@ const finalSubmitRequest = async (req, res) => {
 
 const getStudentRequestStatus = async (req, res) => {
   const { studentId } = req.params;
+  // Additive, opt-in only: by default this endpoint hides a request once it
+  // has been converted into a real, live group (see the AND clause below) —
+  // GroupRequest.tsx relies on that to stop treating a finished request as
+  // "still pending". StudentAnnouncementsPage.tsx needs the opposite: it
+  // reads this same endpoint just to find which supervisor(s) a student has
+  // approved, and that's still true (and still needed) after the group is
+  // created. `includeCreated=true` skips that exclusion; omitting it (as
+  // GroupRequest.tsx does) leaves the existing behavior completely unchanged.
+  const includeCreated = req.query.includeCreated === 'true';
   try {
     // 1. Get the student's university_id to check if they are a member (not just the leader)
     const [userRows] = await dbPromise.query(
@@ -984,6 +1054,12 @@ const getStudentRequestStatus = async (req, res) => {
 
     await ensureRequestLifecycleColumns();
 
+    const liveGroupExclusion = includeCreated
+      ? ''
+      : `AND (COALESCE(is_group_created, 0) = 0 OR created_group_id IS NULL OR NOT EXISTS (
+           SELECT 1 FROM project_groups pg WHERE pg.id = ranked.created_group_id
+         ))`;
+
     const [results] = await dbPromise.query(
       `SELECT * FROM (
          SELECT gr.*, ROW_NUMBER() OVER (PARTITION BY gr.project_level ORDER BY gr.created_at DESC, gr.request_id DESC) AS rn
@@ -991,9 +1067,7 @@ const getStudentRequestStatus = async (req, res) => {
          ${whereClause}
        ) ranked
        WHERE rn = 1
-         AND (COALESCE(is_group_created, 0) = 0 OR created_group_id IS NULL OR NOT EXISTS (
-           SELECT 1 FROM project_groups pg WHERE pg.id = ranked.created_group_id
-         ))
+         ${liveGroupExclusion}
        ORDER BY created_at DESC`,
       whereParams
     );
@@ -1007,7 +1081,8 @@ const getStudentRequestStatus = async (req, res) => {
         `SELECT grs.request_id, grs.supervisor_id, grs.status, grs.rejection_reason, u.name AS supervisor_name
          FROM group_request_supervisors grs
          LEFT JOIN users u ON u.id = grs.supervisor_id
-         WHERE grs.request_id IN (?)`,
+         WHERE grs.request_id IN (?)
+         ORDER BY grs.id ASC`,
         [requestIds]
       );
       supervisorsByRequest = supRows.reduce((acc, row) => {
@@ -1142,13 +1217,14 @@ const rejectGroupRequest = async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // MULTI-SUPERVISOR APPROVAL WORKFLOW
-// A request now targets one-or-more supervisors (group_request_supervisors).
+// A request targets one or two supervisors (group_request_supervisors).
 // group_requests.status is a derived overall status:
-//   pending  — while any child row is pending and none is approved
-//   approved — as soon as ONE supervisor approves (their id is recorded on
-//              group_requests.supervisor_id; every other still-pending
-//              child row is cancelled)
-//   rejected — only once ALL targeted supervisors have rejected
+//   pending  — while any targeted supervisor is still pending
+//   approved — only once EVERY targeted supervisor has approved (this is
+//              what unlocks "Submit to Coordinator" on the student side)
+//   rejected — as soon as ANY targeted supervisor rejects (their reason is
+//              copied up; every other still-pending supervisor is
+//              cancelled, since approval by all is no longer reachable)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1203,9 +1279,10 @@ const getPendingRequestsForSupervisor = async (req, res) => {
 
 /**
  * PUT: A supervisor approves the request that was sent to them.
- * Cascades: this supervisor's row -> 'approved'; group_requests -> 'approved'
- * with supervisor_id set to this supervisor; every other still-pending
- * targeted supervisor's row -> 'cancelled'.
+ * Only flips group_requests.status to 'approved' (unlocking "Submit to
+ * Coordinator") once EVERY supervisor targeted on this request has
+ * approved — previously the FIRST "yes" approved the whole request and
+ * cancelled every other still-pending supervisor.
  */
 const approveRequestBySupervisor = async (req, res) => {
   const requestId = req.body.request_id;
@@ -1236,17 +1313,30 @@ const approveRequestBySupervisor = async (req, res) => {
       `UPDATE group_request_supervisors SET status = 'approved', responded_at = NOW() WHERE id = ?`,
       [rows[0].id]
     );
-    await conn.query(
-      `UPDATE group_requests SET status = 'approved', supervisor_id = ?, processed_at = NOW() WHERE request_id = ?`,
-      [supervisorId, requestId]
-    );
-    await conn.query(
-      `UPDATE group_request_supervisors SET status = 'cancelled', responded_at = NOW() WHERE request_id = ? AND status = 'pending'`,
+
+    // Check every supervisor targeted on this request, not just this one.
+    const [allRows] = await conn.query(
+      `SELECT status FROM group_request_supervisors WHERE request_id = ?`,
       [requestId]
     );
+    const allApproved = allRows.length > 0 && allRows.every((r) => r.status === 'approved');
+
+    if (allApproved) {
+      await conn.query(
+        `UPDATE group_requests SET status = 'approved', processed_at = NOW() WHERE request_id = ?`,
+        [requestId]
+      );
+    }
+    // else: leave group_requests.status as 'pending' — still waiting on the
+    // other supervisor(s) targeted on this request.
 
     await conn.commit();
-    res.json({ success: true, message: 'Request approved.' });
+    res.json({
+      success: true,
+      message: allApproved
+        ? 'Request approved.'
+        : 'Approved. Waiting for the other supervisor to respond.',
+    });
   } catch (err) {
     await conn.rollback();
     console.error('❌ approveRequestBySupervisor error:', err);
@@ -1261,6 +1351,13 @@ const approveRequestBySupervisor = async (req, res) => {
  * The overall group_requests.status only flips to 'rejected' once every
  * targeted supervisor has rejected — otherwise it stays 'pending' while the
  * remaining supervisors decide.
+ */
+/**
+ * PUT: A supervisor rejects the request that was sent to them.
+ * Because every targeted supervisor must approve for the request to move
+ * forward, a single rejection makes that outcome impossible — so the whole
+ * request is failed immediately (any other still-pending supervisor row is
+ * cancelled) instead of waiting for every supervisor to reject.
  */
 const rejectRequestBySupervisor = async (req, res) => {
   const requestId = req.body.request_id;
@@ -1293,18 +1390,14 @@ const rejectRequestBySupervisor = async (req, res) => {
       [reason, rows[0].id]
     );
 
-    const [remaining] = await conn.query(
-      `SELECT COUNT(*) AS cnt FROM group_request_supervisors WHERE request_id = ? AND status = 'pending'`,
+    await conn.query(
+      `UPDATE group_requests SET status = 'rejected', rejection_reason = ?, processed_at = NOW() WHERE request_id = ?`,
+      [reason, requestId]
+    );
+    await conn.query(
+      `UPDATE group_request_supervisors SET status = 'cancelled', responded_at = NOW() WHERE request_id = ? AND status = 'pending'`,
       [requestId]
     );
-
-    if (Number(remaining[0].cnt) === 0) {
-      // Every targeted supervisor has now rejected — surface this reason to the student.
-      await conn.query(
-        `UPDATE group_requests SET status = 'rejected', rejection_reason = ?, processed_at = NOW() WHERE request_id = ?`,
-        [reason, requestId]
-      );
-    }
 
     await conn.commit();
     res.json({ success: true, message: 'Request rejected.' });

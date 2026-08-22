@@ -70,6 +70,10 @@ const runMigrations = async () => {
       name: 'Add academic_unit column to project_stages',
       sql: `ALTER TABLE project_stages ADD COLUMN IF NOT EXISTS academic_unit VARCHAR(50) DEFAULT NULL`,
     },
+    {
+      name: 'Add submission_link column to student_submissions',
+      sql: `ALTER TABLE student_submissions ADD COLUMN IF NOT EXISTS submission_link VARCHAR(500) DEFAULT NULL`,
+    },
   ];
 
   for (const migration of migrations) {
