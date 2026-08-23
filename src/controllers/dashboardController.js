@@ -71,25 +71,28 @@ const getCoordinatorSummary = async (req, res) => {
     // coordinator system-wide (e.g. 11, when a group's own level realistically
     // has 3-4), making "fully evaluated" nearly unreachable and the progress
     // percentage meaningless.
+    // A project is "Completed" once its FINAL stage has been evaluated —
+    // matches the same rule already applied to Calendar panel completion
+    // (the whole evaluation cycle ends at Final, not per-stage). This is
+    // also more robust than counting "all stages marked": a stage that was
+    // later replaced/recreated can leave old marks rows with a NULL
+    // stage_id (no FK match any more), which silently undercounts a
+    // marked-every-stage check but never affects a Final-specific one,
+    // since Final's own marks still carry a valid stage_id.
+    const finalStageMarkedSubquery = `
+      EXISTS (
+        SELECT 1 FROM marks m
+        JOIN project_stages ps ON ps.stage_id = m.stage_id
+        WHERE m.group_id = pg.id AND ps.level = pg.level
+          AND LOWER(TRIM(ps.stage_name)) = 'final'
+      )
+    `;
+
     const completedProjectsQuery = `
       SELECT COUNT(*) AS completedProjects
-      FROM (
-        SELECT
-          pg.id,
-          COALESCE(mark_summary.marked_stages, 0) AS marked_stages,
-          (SELECT COUNT(DISTINCT LOWER(TRIM(stage_name))) FROM project_stages WHERE level = pg.level) AS totalStages
-        FROM project_groups pg
-        LEFT JOIN (
-          SELECT m.group_id, COUNT(DISTINCT LOWER(TRIM(ps.stage_name))) AS marked_stages
-          FROM marks m
-          JOIN project_stages ps ON ps.stage_id = m.stage_id
-          WHERE m.mark_type = 'stage'
-          GROUP BY m.group_id
-        ) mark_summary ON mark_summary.group_id = pg.id
-        ${projectGroupCoordinatorFilter}
-      ) completed_groups
-      WHERE completed_groups.totalStages > 0
-        AND completed_groups.marked_stages >= completed_groups.totalStages
+      FROM project_groups pg
+      ${projectGroupCoordinatorFilter}
+      ${projectGroupCoordinatorFilter ? 'AND' : 'WHERE'} ${finalStageMarkedSubquery}
     `;
 
     const recentProjectsQuery = `
@@ -98,14 +101,12 @@ const getCoordinatorSummary = async (req, res) => {
         pg.group_name AS groupName,
         COALESCE(u.name, 'Unassigned') AS supervisorName,
         CASE
-          WHEN (SELECT COUNT(DISTINCT LOWER(TRIM(stage_name))) FROM project_stages WHERE level = pg.level) > 0
-           AND COALESCE(progress.marked_count, 0) >= (SELECT COUNT(DISTINCT LOWER(TRIM(stage_name))) FROM project_stages WHERE level = pg.level)
-            THEN 'Completed'
-          WHEN COALESCE(progress.marked_count, 0) > 0
-            THEN 'In Progress'
+          WHEN ${finalStageMarkedSubquery} THEN 'Completed'
+          WHEN COALESCE(progress.marked_count, 0) > 0 THEN 'In Progress'
           ELSE 'Pending Approval'
         END AS status,
         CASE
+          WHEN ${finalStageMarkedSubquery} THEN 100
           WHEN (SELECT COUNT(DISTINCT LOWER(TRIM(stage_name))) FROM project_stages WHERE level = pg.level) = 0 THEN 0
           ELSE ROUND((COALESCE(progress.marked_count, 0) / (SELECT COUNT(DISTINCT LOWER(TRIM(stage_name))) FROM project_stages WHERE level = pg.level)) * 100)
         END AS progress,

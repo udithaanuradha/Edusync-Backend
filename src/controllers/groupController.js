@@ -46,6 +46,37 @@ const ensureRequestLifecycleColumns = async () => {
   await ensureRequestLifecycleColumnsPromise;
 };
 
+// A group_requests row can carry up to 2 approved supervisors (see
+// group_request_supervisors / the "both must approve" workflow), but
+// project_groups only ever had room for one — creating a group from a
+// dual-supervisor request silently dropped the second approver entirely.
+// Self-heals the same way ensureRequestLifecycleColumns does.
+let ensureGroupSupervisorId2ColumnPromise = null;
+const ensureGroupSupervisorId2Column = async () => {
+  if (!ensureGroupSupervisorId2ColumnPromise) {
+    ensureGroupSupervisorId2ColumnPromise = (async () => {
+      // TiDB rejects ADD COLUMN + ADD CONSTRAINT on that same new column in
+      // one combined ALTER TABLE ("Key column ... doesn't exist in table") —
+      // unlike vanilla MySQL, they must be two separate statements here.
+      const [columns] = await dbPromise.query("SHOW COLUMNS FROM project_groups LIKE 'supervisor_id_2'");
+      if (columns.length === 0) {
+        await dbPromise.query(`ALTER TABLE project_groups ADD COLUMN supervisor_id_2 INT NULL`);
+        await dbPromise.query(
+          `ALTER TABLE project_groups ADD CONSTRAINT fk_pg_supervisor_2 FOREIGN KEY (supervisor_id_2) REFERENCES users(id)`
+        );
+      }
+    })().catch((error) => {
+      // Don't cache a failed attempt — an error here (e.g. a transient
+      // connection issue) would otherwise permanently skip the column for
+      // the rest of the process's lifetime, since the resolved promise is
+      // reused by every subsequent call.
+      console.warn('project_groups.supervisor_id_2 check failed:', error.message);
+      ensureGroupSupervisorId2ColumnPromise = null;
+    });
+  }
+  await ensureGroupSupervisorId2ColumnPromise;
+};
+
 const projectGroupsHasCreatedBy = async () => {
   if (projectGroupsHasCreatedByCache !== null) {
     return projectGroupsHasCreatedByCache;
@@ -319,10 +350,27 @@ const getCoordinatorApprovedRequests = async (req, res) => {
     // requests aren't shared across every coordinator at a level. If
     // coordinatorId is missing/unresolved, coordinatorDepartment stays null
     // and the added WHERE condition below passes through unfiltered.
+    //
+    // Students choose a degree program from {AI, IT, ITM} at signup;
+    // lecturers/coordinators choose a department from {IT, IDS, CM} — for
+    // the same real-world program these are different raw codes
+    // (IDS==ITM, CM==AI; see ProjectModel.js's normalizeAcademicUnit for
+    // the equivalent used on stage visibility). A raw string comparison
+    // here meant a coordinator stored as 'IDS' could never match their own
+    // students stored as 'ITM', silently hiding every one of their
+    // students' finalized requests from "Pending Group Formations".
+    const normalizeAcademicUnit = (unit) => {
+      const clean = String(unit || '').trim().toUpperCase();
+      if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+      if (clean === 'CM' || clean === 'AI') return 'AI';
+      if (clean === 'IT') return 'IT';
+      return clean || null;
+    };
+
     let coordinatorDepartment = null;
     if (coordinatorId) {
       const [coordRows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
-      coordinatorDepartment = coordRows[0]?.academic_unit || null;
+      coordinatorDepartment = normalizeAcademicUnit(coordRows[0]?.academic_unit);
     }
 
     // Build the WHERE clause dynamically
@@ -332,15 +380,24 @@ const getCoordinatorApprovedRequests = async (req, res) => {
          ))
          AND (? = 0 OR COALESCE(gr.is_final_submitted, 0) = 1)
          AND (? IS NULL OR COALESCE(gr.project_level, student.level) = ?)
-         AND (? IS NULL OR student.academic_unit = ?)`;
+         AND (? IS NULL OR
+              CASE
+                WHEN UPPER(TRIM(student.academic_unit)) IN ('IDS', 'ITM') THEN 'ITM'
+                WHEN UPPER(TRIM(student.academic_unit)) IN ('CM', 'AI') THEN 'AI'
+                WHEN UPPER(TRIM(student.academic_unit)) = 'IT' THEN 'IT'
+                ELSE UPPER(TRIM(student.academic_unit))
+              END = ?)`;
     let params = [finalOnly, level, level, coordinatorDepartment, coordinatorDepartment];
 
     const [rows] = await dbPromise.query(
       `SELECT gr.*, student.name AS student_name, student.level AS student_level,
-              student.academic_unit AS department, supervisor.name AS supervisor_name
+              student.academic_unit AS department,
+              (SELECT GROUP_CONCAT(u.name SEPARATOR ', ')
+               FROM group_request_supervisors grs
+               JOIN users u ON u.id = grs.supervisor_id
+               WHERE grs.request_id = gr.request_id AND grs.status = 'approved') AS supervisor_name
        FROM group_requests gr
        LEFT JOIN users student ON student.id = gr.student_id
-       LEFT JOIN users supervisor ON supervisor.id = gr.supervisor_id
        WHERE ${whereCondition}
        ORDER BY gr.created_at DESC`,
       params
@@ -457,6 +514,7 @@ const createGroup = async (req, res) => {
     groupName,
     level,
     supervisorId,
+    supervisorId2,
     leaderId,
     memberIds,
     createdBy,
@@ -468,6 +526,7 @@ const createGroup = async (req, res) => {
   try {
     await ensureGroupMembersTable();
     await ensureRequestLifecycleColumns();
+    await ensureGroupSupervisorId2Column();
     const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
     connection = await dbPromise.getConnection();
     await connection.beginTransaction();
@@ -480,15 +539,15 @@ const createGroup = async (req, res) => {
       resolvedDepartment = leaderRows[0]?.academic_unit || null;
     }
 
-    let insertQuery = `INSERT INTO project_groups (group_name, level, supervisor_id, department`;
-    const insertValues = [groupName, level, supervisorId || null, resolvedDepartment];
+    let insertQuery = `INSERT INTO project_groups (group_name, level, supervisor_id, supervisor_id_2, department`;
+    const insertValues = [groupName, level, supervisorId || null, supervisorId2 || null, resolvedDepartment];
 
     if (supportsCoordinatorTracking) {
       insertQuery += ', created_by';
       insertValues.push(coordinatorId);
     }
 
-    insertQuery += ') VALUES (?, ?, ?, ?';
+    insertQuery += ') VALUES (?, ?, ?, ?, ?';
     if (supportsCoordinatorTracking) {
       insertQuery += ', ?';
     }
@@ -531,17 +590,18 @@ const createGroup = async (req, res) => {
 // update group details and members 
 const updateGroup = async (req, res) => {
   const groupId = req.params.id;
-  const { groupName, level, supervisorId, department } = req.body;
+  const { groupName, level, supervisorId, supervisorId2, department } = req.body;
   try {
+    await ensureGroupSupervisorId2Column();
     if (department !== undefined) {
       await dbPromise.query(
-        `UPDATE project_groups SET group_name = ?, level = ?, supervisor_id = ?, department = ? WHERE id = ?`,
-        [groupName, level, supervisorId || null, department || null, groupId]
+        `UPDATE project_groups SET group_name = ?, level = ?, supervisor_id = ?, supervisor_id_2 = ?, department = ? WHERE id = ?`,
+        [groupName, level, supervisorId || null, supervisorId2 || null, department || null, groupId]
       );
     } else {
       await dbPromise.query(
-        `UPDATE project_groups SET group_name = ?, level = ?, supervisor_id = ? WHERE id = ?`,
-        [groupName, level, supervisorId || null, groupId]
+        `UPDATE project_groups SET group_name = ?, level = ?, supervisor_id = ?, supervisor_id_2 = ? WHERE id = ?`,
+        [groupName, level, supervisorId || null, supervisorId2 || null, groupId]
       );
     }
     res.json({ success: true, message: 'Group updated.' });
@@ -626,12 +686,15 @@ const getCoordinatorGroups = async (req, res) => {
   
   try {
     await ensureGroupMembersTable();
+    await ensureGroupSupervisorId2Column();
     const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
 
     // 1. Get the Groups created by this coordinator at this level
-    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, u.name AS supervisor
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department,
+              u.name AS supervisor, u2.name AS supervisor2
        FROM project_groups pg
        LEFT JOIN users u ON u.id = pg.supervisor_id
+       LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
        WHERE pg.level = ?`;
     const groupParams = [level];
 
@@ -681,6 +744,7 @@ const getCoordinatorGroups = async (req, res) => {
         groupName: group.groupName,
         department: group.department,
         supervisor: group.supervisor || 'Not Assigned',
+        supervisor2: group.supervisor2 || null,
         leaderName: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         memberCount: groupMembers.length,
         members: groupMembers,
@@ -891,12 +955,18 @@ const createGroupRequest = async (req, res) => {
         }
 
         // The UI sends ONE supervisor per "Request" button click (two
-        // buttons total). While the previous request is still 'pending',
-        // a second call here means the student is requesting their SECOND
-        // supervisor slot, not duplicating the first — append the new
-        // supervisor onto the SAME request instead of wiping it out, so
-        // both stay tracked together and both must approve.
-        if (previous.status === 'pending') {
+        // buttons total). A second call here — whether the first is still
+        // 'pending' OR has already been 'approved' (single-supervisor
+        // requests auto-approve, per approveRequestBySupervisor) — means
+        // the student is requesting their SECOND supervisor slot, not
+        // duplicating the first. As long as the request hasn't been
+        // converted into a live group yet, append the new supervisor onto
+        // the SAME request instead of falling through to the "stale
+        // request" reuse path below, which would otherwise delete the
+        // already-approved supervisor's row AND overwrite members_list with
+        // whatever the client's (possibly stale/empty, e.g. after a page
+        // reload) member selection currently holds.
+        if (previous.status === 'pending' || (previous.status === 'approved' && !hasLiveCreatedGroup)) {
           const [existingSupRows] = await conn.query(
             `SELECT supervisor_id FROM group_request_supervisors WHERE request_id = ? FOR UPDATE`,
             [previous.request_id]
@@ -922,6 +992,19 @@ const createGroupRequest = async (req, res) => {
             `INSERT INTO group_request_supervisors (request_id, supervisor_id, status) VALUES ?`,
             [newSupervisorRows]
           );
+
+          // A newly-added, not-yet-approved supervisor means the request as
+          // a whole is no longer fully approved until this one responds too
+          // — demote it back to 'pending' (approveRequestBySupervisor will
+          // re-promote to 'approved' once every targeted supervisor,
+          // including this new one, has approved). Any earlier final-submit
+          // is no longer valid either.
+          if (previous.status === 'approved') {
+            await conn.query(
+              `UPDATE group_requests SET status = 'pending', is_final_submitted = FALSE WHERE request_id = ?`,
+              [previous.request_id]
+            );
+          }
 
           await conn.commit();
           return res.status(201).json({
