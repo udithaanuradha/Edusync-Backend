@@ -419,6 +419,25 @@ const submitEvaluationMarks = async (req, res) => {
             );
             if (stageRows.length > 0) {
                 resolvedStageId = stageRows[0].stage_id;
+            } else {
+                // Calendar panels (evaluation_panels.evaluation_type) aren't
+                // required to match a coordinator-authored project_stages row
+                // 1:1 — a supervisor can be scheduled to evaluate a stage
+                // (e.g. "Interim") the coordinator never manually created a
+                // template for. Previously this left resolvedStageId as
+                // null, so the mark got inserted with no stage_id at all —
+                // recorded but invisible everywhere the marksheet/canonical
+                // stage list is built from project_stages (Reports tab,
+                // dashboard completion logic). Create the stage on first use
+                // instead, keyed to the evaluator who's actually conducting
+                // it, so the stage — and the marks against it — show up
+                // dynamically rather than requiring the coordinator to have
+                // pre-defined every possible stage name in advance.
+                const [insertResult] = await db.promise().query(
+                    `INSERT INTO project_stages (level, stage_name, created_by) VALUES (?, ?, ?)`,
+                    [levelVal, evaluation_type, evaluatorId]
+                );
+                resolvedStageId = insertResult.insertId;
             }
         }
 
