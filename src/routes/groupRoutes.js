@@ -11,6 +11,7 @@ const router = express.Router();
   getCoordinatorGroups,
   getGroupMembers,
   getSupervisors,
+  getAvailableMembersForLevel,
   createGroupRequest,
   approveGroupRequest,
   rejectGroupRequest,
@@ -38,6 +39,11 @@ router.get('/student-group/:studentId/:level', getStudentGroup);
 // has been calling this exact path all along, so it 404'd and the
 // "Loading supervisors..." UI never resolved)
 router.get('/supervisors', getSupervisors);
+
+// Students at a level who are NOT already in a live group (same department
+// as the requester) — used by the "Add Group Members" picker so an
+// already-grouped student can no longer be selected into a second group.
+router.get('/available-members/:level', getAvailableMembersForLevel);
 
 // Get members for a specific group (used by Project Management page)
 router.get('/:groupId/members', getGroupMembers);
