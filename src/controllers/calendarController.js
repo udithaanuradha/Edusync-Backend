@@ -135,6 +135,60 @@ const scheduleEvaluationPanel = async (req, res) => {
 };
 
 /**
+ * Update an existing evaluation panel in place — the drawer's "Update Panel"
+ * action (openEditPanelDrawer/handleScheduleSubmit in CalendarPage.tsx).
+ * There was previously no route for this at all: editing always POSTed to
+ * scheduleEvaluationPanel, which only ever INSERTs, so "editing" a panel
+ * silently left the original row untouched in the database and inserted a
+ * second, near-duplicate one — the edited panel and the stale original both
+ * showed up in "Upcoming Panels" once the list was reloaded from the server.
+ * This is the real fix: PUT /api/calendar/panels/:id updates the row in place.
+ * Expects the same body shape as scheduleEvaluationPanel.
+ */
+const updateEvaluationPanel = async (req, res) => {
+    const panelId = Number(req.params.id);
+
+    if (!panelId || Number.isNaN(panelId)) {
+        return res.status(400).json({ error: 'A valid panel id is required.' });
+    }
+
+    const {
+        evaluationType, academicLevel, targetGroup, evaluators, supervisors, panelDate, startTime, duration, location,
+        meetingLink, notes, kind,
+    } = req.body;
+
+    try {
+        await ensureEvaluationPanelMeetingColumns();
+        await ensureEvaluationPanelSupervisorsColumn();
+
+        const evaluatorsString = JSON.stringify(evaluators);
+        const supervisorsString = JSON.stringify(supervisors || []);
+
+        const query = `
+            UPDATE evaluation_panels
+            SET evaluation_type = ?, academic_level = ?, target_group = ?, evaluators = ?, supervisors = ?,
+                panel_date = ?, start_time = ?, duration = ?, location = ?, meeting_link = ?, notes = ?, kind = ?
+            WHERE id = ?
+        `;
+
+        const [result] = await db.promise().query(query, [
+            evaluationType, academicLevel, targetGroup, evaluatorsString, supervisorsString, panelDate, startTime, duration, location,
+            meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
+            panelId,
+        ]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Panel not found.' });
+        }
+
+        res.status(200).json({ message: 'Evaluation panel updated successfully!' });
+    } catch (error) {
+        console.error('Database error (updateEvaluationPanel):', error);
+        res.status(500).json({ error: 'Failed to update panel' });
+    }
+};
+
+/**
  * Fetch upcoming panels. Used by the coordinator Calendar page to populate
  * BOTH the "Upcoming Panels" sidebar and the whole month grid's per-day
  * panel-count markers (CalendarPage.tsx's loadPanelsFromServer/markerMap).
@@ -267,6 +321,7 @@ const getFrozenDates = async (req, res) => {
 
 module.exports = {
     scheduleEvaluationPanel,
+    updateEvaluationPanel,
     getUpcomingPanels,
     completePanelsForGroups,
     deleteEvaluationPanel,
