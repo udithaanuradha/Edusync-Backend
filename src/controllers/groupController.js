@@ -170,12 +170,21 @@ const getGroupsByLevel = async (req, res) => {
   
   try {
     await ensureGroupMembersTable();
+    await ensureGroupSupervisorId2Column();
     const supportsCoordinatorTracking = await projectGroupsHasCreatedBy();
 
     // 1. Get the Groups - filter by coordinator if provided
-    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor,pg.mentor_id AS mentorId
+    // supervisor_id_2 is included (alongside the primary supervisor_id) so
+    // the Calendar page's panel-scheduling drawer can auto-detect BOTH of a
+    // group's assigned supervisors when building the panel roster, rather
+    // than only ever seeing the first one.
+    let groupQuery = `SELECT pg.id AS groupId, pg.group_name AS groupName,
+                     pg.supervisor_id AS supervisorId, u.name AS supervisor,
+                     pg.supervisor_id_2 AS supervisorId2, u2.name AS supervisor2,
+                     pg.mentor_id AS mentorId
                      FROM project_groups pg
                      LEFT JOIN users u ON u.id = pg.supervisor_id
+                     LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
                      WHERE pg.level = ?`;
     let params = [level];
     
@@ -227,7 +236,10 @@ const getGroupsByLevel = async (req, res) => {
         groupId: group.groupId,
         groupName: group.groupName,
         department: group.department,
+        supervisorId: group.supervisorId || null,
         supervisor: group.supervisor || 'Not Assigned',
+        supervisorId2: group.supervisorId2 || null,
+        supervisor2: group.supervisor2 || null,
         mentorId: group.mentorId,
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         members: groupMembers,

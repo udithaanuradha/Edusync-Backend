@@ -62,32 +62,66 @@ const ensureEvaluationPanelMeetingColumns = async () => {
     await ensureEvaluationPanelMeetingColumnsPromise;
 };
 
+// `evaluators` has always held the FULL panel roster (group supervisor(s)
+// plus any additional evaluators the coordinator picks) — every existing
+// "am I on this panel?" lookup (getPanelsByEvaluator, checkEvaluatorStatus,
+// getMyAssignedGroups) matches against it with a plain LIKE, and every
+// existing display (SupervisorEvaluationPanel's "Panel Evaluators" pill,
+// CoordinatorReportInner, StudentMarks) reads it as the complete list.
+// `supervisors` is purely additive metadata: the subset of `evaluators` that
+// are the group's actual assigned supervisor(s), auto-detected by
+// CalendarPage.tsx from the selected group rather than hand-picked, so the
+// UI can badge them separately without touching any of that existing
+// matching/display logic. Self-heals the same way
+// ensureEvaluationPanelMeetingColumns does.
+let ensureEvaluationPanelSupervisorsColumnPromise = null;
+const ensureEvaluationPanelSupervisorsColumn = async () => {
+    if (!ensureEvaluationPanelSupervisorsColumnPromise) {
+        ensureEvaluationPanelSupervisorsColumnPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM evaluation_panels');
+                const hasColumn = (columns || []).some((column) => column.Field === 'supervisors');
+                if (!hasColumn) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN supervisors TEXT NULL`);
+                }
+            } catch (error) {
+                console.warn('evaluation_panels supervisors column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureEvaluationPanelSupervisorsColumnPromise;
+};
+
 /**
  * Schedule an evaluation panel
- * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
- * Stores evaluators as JSON text in the `evaluation_panels` table.
+ * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, supervisors?, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
+ * `evaluators` is the full panel roster (supervisors + external evaluators);
+ * `supervisors` is the subset of that roster auto-detected as the group's
+ * assigned supervisor(s). Both are stored as JSON text in `evaluation_panels`.
  */
 const scheduleEvaluationPanel = async (req, res) => {
     const {
-        evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location,
+        evaluationType, academicLevel, targetGroup, evaluators, supervisors, panelDate, startTime, duration, location,
         meetingLink, notes, kind,
     } = req.body;
 
     try {
         await ensureEvaluationPanelMeetingColumns();
+        await ensureEvaluationPanelSupervisorsColumn();
 
-        // Convert evaluators array/object into a JSON string for storage.
+        // Convert evaluators/supervisors arrays into JSON strings for storage.
         const evaluatorsString = JSON.stringify(evaluators);
+        const supervisorsString = JSON.stringify(supervisors || []);
 
         const query = `
             INSERT INTO evaluation_panels
-            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location, meeting_link, notes, kind)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (evaluation_type, academic_level, target_group, evaluators, supervisors, panel_date, start_time, duration, location, meeting_link, notes, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         // Use the promise wrapper on the pool to await the query result.
         await db.promise().query(query, [
-            evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location,
+            evaluationType, academicLevel, targetGroup, evaluatorsString, supervisorsString, panelDate, startTime, duration, location,
             meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
         ]);
 
