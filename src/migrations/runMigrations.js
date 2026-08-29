@@ -10,6 +10,38 @@ const runMigrations = async () => {
 
   const migrations = [
     {
+      name: 'Ensure evaluation_panels table exists',
+      sql: `CREATE TABLE IF NOT EXISTS evaluation_panels (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        evaluation_type VARCHAR(255) NOT NULL,
+        academic_level INT NOT NULL,
+        target_group VARCHAR(255) NOT NULL,
+        evaluators JSON NULL,
+        panel_date DATE NOT NULL,
+        start_time TIME NOT NULL,
+        duration VARCHAR(50) DEFAULT '60 min',
+        location VARCHAR(255) DEFAULT 'To be announced',
+        meeting_link TEXT DEFAULT NULL,
+        notes TEXT DEFAULT NULL,
+        kind VARCHAR(100) DEFAULT 'Coordinator scheduled panel',
+        created_by INT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+    },
+    {
+      name: 'Ensure frozen_dates table exists',
+      sql: `CREATE TABLE IF NOT EXISTS frozen_dates (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        frozen_date DATE NOT NULL,
+        reason VARCHAR(255) DEFAULT '',
+        type VARCHAR(80) DEFAULT 'calendar_freeze',
+        created_by INT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_frozen_date (frozen_date),
+        CONSTRAINT fk_frozen_dates_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+      )`,
+    },
+    {
       name: 'Add resource_links column to project_stages',
       sql: `ALTER TABLE project_stages ADD COLUMN IF NOT EXISTS resource_links TEXT DEFAULT NULL`,
     },
@@ -28,6 +60,19 @@ const runMigrations = async () => {
     {
       name: 'Add read_status column',
       sql: `ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_status BOOLEAN DEFAULT false`,
+    },
+    {
+      // Scopes a stage to the degree program it was created for. NULL means
+      // "visible to everyone" — existing stages keep their current global
+      // visibility; only stages created after this migration get scoped.
+      // (Also self-healed lazily in ProjectModel.js's ensureStageAcademicUnitColumn,
+      // so this doesn't have to be run manually against every environment.)
+      name: 'Add academic_unit column to project_stages',
+      sql: `ALTER TABLE project_stages ADD COLUMN IF NOT EXISTS academic_unit VARCHAR(50) DEFAULT NULL`,
+    },
+    {
+      name: 'Add submission_link column to student_submissions',
+      sql: `ALTER TABLE student_submissions ADD COLUMN IF NOT EXISTS submission_link VARCHAR(500) DEFAULT NULL`,
     },
   ];
 

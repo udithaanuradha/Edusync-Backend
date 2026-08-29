@@ -8,13 +8,17 @@ const { uploadBufferToCloudinary } = require('../config/cloudinaryConfig');
 /**
  * GET /api/projects/level/:level
  * Returns all stages for the provided `level`.
- * If ?coordinatorId=X is provided, filters to only stages created by that coordinator.
+ * If ?coordinatorId=X is provided, filters to only stages created by that coordinator
+ * (coordinator's own management view — sees everything they created).
+ * Otherwise, if ?academicUnit=X is provided, filters to stages scoped to that degree
+ * program plus any legacy/global stage with no program scoping (student-facing view).
  */
 const getStagesByLevel = (req, res) => {
     const level = req.params.level;
     const coordinatorId = req.query.coordinatorId; // Extract from query string
-    
-    Project.getStagesByLevel(level, coordinatorId, (err, results) => {
+    const academicUnit = req.query.academicUnit;
+
+    Project.getStagesByLevel(level, coordinatorId, academicUnit, (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, data: results });
     });
@@ -125,11 +129,10 @@ const uploadStageFile = async (req, res) => {
         return res.status(400).json({ success: false, error: 'stage_id is required' });
     }
 
-    if (!req.file.buffer) {
-        console.error('❌ No file buffer returned by multer.', req.file);
-        return res.status(500).json({ success: false, error: 'Upload failed before file buffer was available' });
-    }
 
+    // File info from Cloudinary
+    const fileName = req.file.originalname;
+    const fileUrl = req.file.path; // Cloudinary URL (e.g., https://res.cloudinary.com/...)
     const uploaderId = uploaded_by ? parseInt(uploaded_by) : 1;
 
     try {

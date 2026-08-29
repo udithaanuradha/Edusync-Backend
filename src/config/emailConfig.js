@@ -72,8 +72,41 @@ const sendMentorInviteEmail = async (toEmail, mentorName, groupName, setupUrl) =
     return await transporter.sendMail(mailOptions);
 };
 
-// Export BOTH functions so different parts of the backend can use them
+/**
+ * TYPE 3: Sends a stylized Password Reset Link HTML email.
+ */
+const sendPasswordResetLinkEmail = async (toEmail, userName, resetUrl) => {
+    const mailOptions = {
+        from: '"EduSync Security" <medinieedirisinghe@gmail.com>',
+        to: toEmail,
+        subject: "Reset Your EduSync Password",
+        html: `
+            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; max-width: 480px; margin: 0 auto; background-color: #ffffff;">
+                <h2 style="color: #0f172a; margin-bottom: 6px; font-size: 22px;">Reset Your Password</h2>
+                <p style="color: #475569; font-size: 14px; line-height: 1.5;">Hello ${userName || 'User'},</p>
+                <p style="color: #475569; font-size: 14px; line-height: 1.5;">We received a request to reset the password for your EduSync account. Click the button below to choose a new password. This link will remain valid for <strong>15 minutes</strong>:</p>
+                
+                <div style="text-align: center; margin: 28px 0;">
+                    <a href="${resetUrl}" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; border-radius: 8px; font-weight: 700; font-size: 14px; text-decoration: none; display: inline-block;">
+                        Reset My Password
+                    </a>
+                </div>
+                
+                <p style="color: #64748b; font-size: 12px; line-height: 1.4;">If the button above does not work, copy and paste this link into your browser:</p>
+                <p style="color: #2563eb; font-size: 11px; word-break: break-all; line-height: 1.4;">${resetUrl}</p>
+                
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+                <p style="color: #94a3b8; font-size: 11px; margin: 0; line-height: 1.4;">If you did not request a password reset, you can safely ignore this email; your password will remain unchanged.</p>
+            </div>
+        `
+    };
+
+    return await transporter.sendMail(mailOptions);
+};
+
+// Export all functions so different parts of the backend can use them
 module.exports = { 
     sendOtpEmail, 
-    sendMentorInviteEmail 
+    sendMentorInviteEmail,
+    sendPasswordResetLinkEmail
 };

@@ -1,10 +1,11 @@
- const express = require("express");
+const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
 const path = require("path");
+const bcrypt = require("bcryptjs");
 require("dotenv").config();
-const { validateUserCreation } = require("./src/utils/validators");
-const { sendOtpEmail } = require("./src/config/emailConfig");
+const { validateUserCreation, validatePassword } = require("./src/utils/validators");
+const { sendOtpEmail, sendPasswordResetLinkEmail } = require("./src/config/emailConfig");
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -58,21 +59,61 @@ app.post("/api/login", (req, res) => {
   if (!email || !password)
     return res.status(400).json({ error: "Email and password required" });
 
+  const cleanEmail = email.trim().toLowerCase();
+
   db.query(
-    "SELECT id, name, email, role, designation, level, is_verified FROM users WHERE email = ? AND password = ?",
-    [email, password],
-    (err, results) => {
+    "SELECT id, name, email, password, role, designation, level, academic_unit, is_verified FROM users WHERE LOWER(TRIM(email)) = ?",
+    [cleanEmail],
+    async (err, results) => {
       if (err) return res.status(500).json({ error: "Internal server error" });
       if (!results.length)
         return res.status(401).json({ error: "Invalid credentials" });
 
-      const user = normalizeUserForClient(results[0]);
+      const rawUser = results[0];
+      const dbPassword = rawUser.password || '';
+
+      // Hybrid Password Check:
+      // 1. If hashed with bcrypt ($2a$, $2b$, $2y$), use bcrypt.compare
+      // 2. If legacy plain-text password, compare directly
+      const isHashed = dbPassword.startsWith('$2a$') || dbPassword.startsWith('$2b$') || dbPassword.startsWith('$2y$');
+      let isMatch = false;
+
+      if (isHashed) {
+        try {
+          isMatch = await bcrypt.compare(password, dbPassword);
+        } catch (compErr) {
+          console.error("Bcrypt compare error:", compErr);
+          isMatch = false;
+        }
+      } else {
+        isMatch = (password === dbPassword);
+      }
+
+      if (!isMatch) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+
+      // If user's password in DB was unencrypted plain-text, automatically hash and update it now
+      if (!isHashed) {
+        try {
+          const saltRounds = 10;
+          const newHash = await bcrypt.hash(password, saltRounds);
+          db.query("UPDATE users SET password = ? WHERE id = ?", [newHash, rawUser.id], (upHashErr) => {
+            if (upHashErr) console.error("❌ Failed to auto-encrypt user password:", upHashErr);
+            else console.log(`🔒 Auto-encrypted password in database for: ${rawUser.email} (${rawUser.role})`);
+          });
+        } catch (autoHashErr) {
+          console.error("Auto-hash error on login:", autoHashErr);
+        }
+      }
+
+      const user = normalizeUserForClient(rawUser);
+      delete user.password; // Never expose password hash to frontend
 
       if (!user.is_verified) {
         return res.status(403).json({ error: "Please verify your email before logging in" });
       }
       delete user.is_verified;
-
       db.query(
         "UPDATE users SET last_login = NOW() WHERE id = ?",
         [user.id],
@@ -90,44 +131,87 @@ app.post('/api/signup', async (req, res) => {
   let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
 
   // Basic backend-side validation using central validator
-  // Note: `department` here is validated only for role === 'student' (see
-  // validators.js) — academic_unit doubles as a lecturer's own department
-  // (a different value domain), which this validation deliberately ignores.
-  const validationResult = validateUserCreation({ firstName, lastName, email, password, role, universityId: university_id, department: academic_unit });
+  const validationResult = validateUserCreation({ firstName, lastName, email, phone, password, role, universityId: university_id, department: academic_unit });
   if (!validationResult.valid) {
-    return res.status(400).json({ error: 'Validation failed', details: validationResult.errors });
+    return res.status(400).json({ error: 'Validation failed', details: validationResult.errors, message: validationResult.errors[0] });
   }
 
-  const name = `${firstName.trim()} ${lastName.trim()}`.trim();
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanUniId = university_id ? university_id.trim().toUpperCase() : null;
 
-  // Level applies to students only; lecturers are supervisors by default.
-  const levelValue = role === 'student' ? 1 : null;
-  const designationValue = role === 'lecturer' ? 'supervisor' : null;
-  const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  // Check 1: Duplicate Email Check
+  db.query("SELECT id FROM users WHERE LOWER(TRIM(email)) = ?", [cleanEmail], (emailErr, emailRows) => {
+    if (emailErr) return res.status(500).json({ error: emailErr.message });
+    if (emailRows.length > 0) {
+      return res.status(400).json({ error: 'This email address is already registered. Please login or use a different email.' });
+    }
 
-  db.query(userSql, [name, email, password, role, university_id, phone, academic_unit || null, levelValue, designationValue], async (err, result) => {
-    if (err) return res.status(500).json({ error: err.message });
+    // Check 2: Duplicate University ID Check (for students)
+    if (role === 'student' && cleanUniId) {
+      db.query("SELECT id FROM users WHERE UPPER(TRIM(university_id)) = ?", [cleanUniId], (uniErr, uniRows) => {
+        if (uniErr) return res.status(500).json({ error: uniErr.message });
+        if (uniRows.length > 0) {
+          return res.status(400).json({ error: 'This University ID is already registered. Please login or check your ID.' });
+        }
 
-    const newUserId = result.insertId; 
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
-
-    // Insert into your otp_verifications table using the newly generated user ID integer
-    const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
-    db.query(otpSql, [newUserId, otpCode, expiresAt], async (otpErr, otpResult) => {
-      if (otpErr) return res.status(500).json({ error: otpErr.message });
-
-      try {
-        console.log(`📧 Sending OTP to ${email}`);
-        await sendOtpEmail(email, otpCode);
-        console.log(`✅ OTP email sent to ${email}`);
-        return res.status(200).json({ success: true, message: "User registered. OTP sent!" });
-      } catch (mailErr) {
-        console.error('❌ Failed to send OTP email:', mailErr);
-        return res.status(500).json({ error: 'User created but OTP email could not be sent.', details: mailErr.message });
-      }
-    });
+        proceedWithUserInsert();
+      });
+    } else {
+      proceedWithUserInsert();
+    }
   });
+
+  async function proceedWithUserInsert() {
+    try {
+      const name = `${firstName.trim()} ${lastName.trim()}`.trim();
+      const levelValue = role === 'student' ? 1 : null;
+      const designationValue = role === 'lecturer' ? 'supervisor' : null;
+
+      // Hash password using bcrypt for newly registering users
+      const saltRounds = 10;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+      const userSql = "INSERT INTO users (name, email, password, role, university_id, phone, academic_unit, level, designation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+      db.query(userSql, [name, cleanEmail, hashedPassword, role, cleanUniId, phone || null, academic_unit || null, levelValue, designationValue], async (err, result) => {
+        if (err) {
+          if (err.code === 'ER_DUP_ENTRY' || err.message.includes('Duplicate')) {
+            if (err.message.includes('email') || err.message.includes('key 2') || err.message.includes('users.email')) {
+              return res.status(400).json({ error: 'This email address is already registered. Please login or use a different email.' });
+            }
+            if (err.message.includes('university_id') || err.message.includes('users.university_id')) {
+              return res.status(400).json({ error: 'This University ID is already registered. Please login or check your ID.' });
+            }
+            return res.status(400).json({ error: 'Account with these details already exists. Please login instead.' });
+          }
+          return res.status(500).json({ error: err.message });
+        }
+
+        const newUserId = result.insertId; 
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString(); 
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000); 
+
+        // Insert into otp_verifications table
+        const otpSql = "INSERT INTO otp_verifications (user_id, otp_code, expires_at) VALUES (?, ?, ?)";
+        db.query(otpSql, [newUserId, otpCode, expiresAt], async (otpErr, otpResult) => {
+          if (otpErr) return res.status(500).json({ error: otpErr.message });
+
+          try {
+            console.log(`📧 Sending OTP to ${cleanEmail}`);
+            await sendOtpEmail(cleanEmail, otpCode);
+            console.log(`✅ OTP email sent to ${cleanEmail}`);
+            return res.status(200).json({ success: true, message: "User registered. OTP sent!" });
+          } catch (mailErr) {
+            console.error('❌ Failed to send OTP email:', mailErr);
+            return res.status(500).json({ error: 'User created but OTP email could not be sent.', details: mailErr.message });
+          }
+        });
+      });
+    } catch (hashErr) {
+      console.error("Error hashing password during signup:", hashErr);
+      return res.status(500).json({ error: "Failed to process security credentials." });
+    }
+  }
 });
 
 app.post('/api/verify-otp', (req, res) => {
@@ -215,6 +299,98 @@ app.post('/api/resend-otp', (req, res) => {
     });
 });
 
+// --- Forgot Password: Step 1 (Send Reset Link via Email) ---
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email || !email.trim()) {
+    return res.status(400).json({ error: "Email address is required." });
+  }
+
+  const cleanEmail = email.trim().toLowerCase();
+
+  db.query("SELECT id, name, email FROM users WHERE LOWER(TRIM(email)) = ?", [cleanEmail], async (err, users) => {
+    if (err) return res.status(500).json({ error: "Internal server error during account lookup." });
+    if (users.length === 0) {
+      return res.status(404).json({ error: "No EduSync account found with this email address." });
+    }
+
+    const user = users[0];
+    const frontendDomain = process.env.FRONTEND_URL || 'http://localhost:5173';
+    
+    // Create base64 encoded token with 15-minute expiration
+    const payload = Buffer.from(JSON.stringify({
+      userId: user.id,
+      email: user.email,
+      expiresAt: Date.now() + 15 * 60 * 1000 // 15 mins
+    })).toString('base64');
+
+    const resetUrl = `${frontendDomain}/reset-password/${payload}`;
+
+    try {
+      console.log(`📧 Sending password reset link to ${cleanEmail}`);
+      await sendPasswordResetLinkEmail(cleanEmail, user.name, resetUrl);
+      console.log(`✅ Password reset link email sent to ${cleanEmail}`);
+      return res.status(200).json({ success: true, message: "A password reset link has been sent to your email address. Please check your inbox and click the link to reset your password." });
+    } catch (mailErr) {
+      console.error("❌ Failed to send password reset email:", mailErr);
+      return res.status(500).json({ error: "Failed to send reset email. Please try again later.", details: mailErr.message });
+    }
+  });
+});
+
+// --- Forgot Password: Step 2 (Reset Password with Token) ---
+app.post('/api/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: "Reset token and new password are required." });
+  }
+
+  // Validate password strength
+  if (!validatePassword(newPassword)) {
+    return res.status(400).json({ error: "Password must be at least 8 characters and include uppercase, lowercase, number, and special character." });
+  }
+
+  try {
+    const rawData = Buffer.from(token, 'base64').toString('utf-8');
+    const { userId, email, expiresAt } = JSON.parse(rawData);
+
+    if (!userId || !email) {
+      return res.status(400).json({ error: "Invalid password reset link." });
+    }
+
+    if (Date.now() > expiresAt) {
+      return res.status(400).json({ error: "This password reset link has expired (15-minute validity limit). Please request a new link from the login page." });
+    }
+
+    db.query("SELECT id FROM users WHERE id = ? AND LOWER(TRIM(email)) = ?", [userId, email.trim().toLowerCase()], async (err, users) => {
+      if (err) return res.status(500).json({ error: "Database error during account verification." });
+      if (users.length === 0) {
+        return res.status(404).json({ error: "User account not found." });
+      }
+
+      try {
+        // Hash the new password with bcrypt
+        const saltRounds = 10;
+        const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+        // Update password and ensure account is verified
+        const updateSql = "UPDATE users SET password = ?, is_verified = 1 WHERE id = ?";
+        db.query(updateSql, [hashedPassword, userId], (upErr) => {
+          if (upErr) return res.status(500).json({ error: "Failed to update password in database." });
+          return res.status(200).json({ success: true, message: "Your password has been successfully reset! You can now log in." });
+        });
+      } catch (hashErr) {
+        console.error("Error hashing new password:", hashErr);
+        return res.status(500).json({ error: "Failed to securely process new password." });
+      }
+    });
+
+  } catch (parseErr) {
+    return res.status(400).json({ error: "Invalid or corrupt password reset link." });
+  }
+});
+
 // --- 4. Project & File Management ---
 const { uploadStageFile } = require("./src/controllers/projectController");
 
@@ -250,6 +426,8 @@ app.get("/api/admin/stats", (req, res) => {
     `SELECT 
       (SELECT COUNT(*) FROM users) as totalUsers,
       (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
+      (SELECT COUNT(*) FROM users WHERE role = 'coordinator' OR designation = 'coordinator') as totalCoordinators,
+      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR designation = 'supervisor' OR (role = 'lecturer' AND (designation IS NULL OR designation != 'coordinator'))) as totalSupervisors,
       (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
       (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
     (err, results) => {
@@ -297,8 +475,17 @@ app.use("/api/projects", projectRoutes);
 const userRoutes = require("./src/routes/userRoutes");
 app.use("/api/users", userRoutes);
 
+const mentorGroupRoutes = require("./src/routes/mentorGroupRoutes");
+app.use("/api/groups", mentorGroupRoutes);
+
 const groupRoutes = require("./src/routes/groupRoutes");
 app.use("/api/groups", groupRoutes);
+
+const groupDetailsToSupervisorDashboardRoutes = require("./src/routes/groupDetailsToSupervisorDashboardRoutes");
+app.use("/api/groupdetailstosupervisordashboard", groupDetailsToSupervisorDashboardRoutes);
+
+const superviceStProgressRoutes = require("./src/routes/superviceStProgressRoutes");
+app.use("/api/supervice-st-progress", superviceStProgressRoutes);
 
 const calendarRoutes = require("./src/routes/calendarRoutes");
 app.use("/api/calendar", calendarRoutes);
@@ -309,11 +496,11 @@ app.use("/api/supervisorpartincalender", supervisorpartincalenderRoutes);
 const supervisorTaskRoutes = require("./src/routes/supervisorTaskRoutes");
 app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 
-const messageRoutes = require("./src/routes/messageRoutes");
-app.use("/api/messages", messageRoutes);
-
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
+app.use("/api/meeting-requests", meetingRequestRoutes);
 
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);
@@ -329,23 +516,52 @@ app.use("/api/dashboard", dashboardRoutes);
 const marksRoutes = require("./src/routes/marksRoutes");
 app.use("/api/marks", marksRoutes);
 
+const evaluationPanelRoutes = require("./src/routes/evaluationPanelRoutes");
+app.use("/api/evaluation-panels", evaluationPanelRoutes);
+
 // Backup Schedule Routes
 const backupRoutes = require("./src/routes/backupRoutes");
 app.use("/api/backups", backupRoutes);
 
 const mentorRoutes = require("./src/routes/mentorRoutes");
-app.use("/api/mentor", mentorRoutes);
+app.use("/api/mentor", mentorRoutes); 
 
 const mentorOnboardingRoutes = require("./src/routes/mentorOnboardingRoutes");
 app.use("/api/admin/mentors", mentorOnboardingRoutes);
+app.use("/api/mentor-onboarding", mentorOnboardingRoutes);
 
-// --- 7. Server Initialization ---
+// --- 7. Server Initialization & Socket.IO V2 ---
 app.get("/", (req, res) => res.send("Edusync Backend is running!"));
 
+// V2 Real-time Chat Routes
+const messageV2Routes = require("./src/routes/messageV2Routes");
+app.use("/api/v2/messages", messageV2Routes);
+
+// V2 Group Chat Routes (supervisor<->group, mentor<->group)
+const groupConversationV2Routes = require("./src/routes/groupConversationV2Routes");
+app.use("/api/v2/group-conversations", groupConversationV2Routes);
+
 app.use((err, req, res, next) => {
-  console.error("❌ Global Error Handler:", err);
+  console.error("Global Error Handler:", err);
   res.status(500).json({ success: false, error: err.message || "Internal server error" });
 });
 
+const http = require("http");
+const server = http.createServer(app);
+
+try {
+  const { setupSocketV2 } = require("./src/sockets/socketV2");
+  setupSocketV2(server, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST", "PATCH"],
+      credentials: true,
+    }
+  });
+  console.log("⚡ Socket.IO V2 Server initialized!");
+} catch (socketErr) {
+  console.warn("⚠️ Socket.IO V2 setup warning:", socketErr.message);
+}
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

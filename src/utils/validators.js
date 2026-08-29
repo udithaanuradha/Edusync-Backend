@@ -41,7 +41,7 @@ function validateRole(role) {
 }
 
 /**
- * Validates email format using a basic regex pattern
+ * Validates email format using regex pattern with proper domain and TLD
  * @param {string} email - The email to validate
  * @returns {boolean} - True if email format is valid, false otherwise
  */
@@ -49,22 +49,40 @@ function validateEmail(email) {
   if (!email || typeof email !== 'string') {
     return false;
   }
-  // Basic email validation regex
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
   return emailRegex.test(email.trim());
 }
 
 /**
- * Validates password strength
+ * Validates phone number format: exactly 10 digits, letters rejected
+ * @param {string} phone - The phone number to validate
+ * @returns {boolean} - True if phone is valid (or empty if optional)
+ */
+function validatePhone(phone) {
+  if (!phone || typeof phone !== 'string') {
+    return true; // Optional if not provided
+  }
+  const trimmed = phone.trim();
+  if (trimmed === '') return true;
+  return /^\d{10}$/.test(trimmed);
+}
+
+/**
+ * Validates password strength: min 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special character
  * @param {string} password - The password to validate
- * @returns {boolean} - True if password meets minimum requirements, false otherwise
+ * @returns {boolean} - True if password meets all requirements, false otherwise
  */
 function validatePassword(password) {
   if (!password || typeof password !== 'string') {
     return false;
   }
-  // Minimum 6 characters
-  return password.length >= 6;
+  const minLength = password.length >= 8;
+  const hasUpper = /[A-Z]/.test(password);
+  const hasLower = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecial = /[!@#$%^&*(),.?":{}|<>_~`+=\\/\-[\]]/.test(password);
+
+  return minLength && hasUpper && hasLower && hasNumber && hasSpecial;
 }
 
 /**
@@ -82,7 +100,7 @@ function validateName(name) {
 }
 
 /**
- * Validates university ID format (for students)
+ * Validates university ID format: 6 numbers followed by 1 letter (e.g., 235020G)
  * @param {string} universityId - The university ID to validate
  * @returns {boolean} - True if universityId is valid, false otherwise
  */
@@ -90,9 +108,8 @@ function validateUniversityId(universityId) {
   if (!universityId || typeof universityId !== 'string') {
     return false;
   }
-  // University ID should be alphanumeric, at least 3 characters
   const trimmed = universityId.trim();
-  return trimmed.length >= 3 && /^[a-zA-Z0-9]+$/.test(trimmed);
+  return /^\d{6}[a-zA-Z]$/.test(trimmed);
 }
 
 /**
@@ -102,9 +119,10 @@ function validateUniversityId(universityId) {
  * @param {string} userData.firstName - User's first name (required)
  * @param {string} userData.lastName - User's last name (required)
  * @param {string} userData.email - User's email (required, must be unique in database)
- * @param {string} userData.password - User's password (required, min 6 chars)
+ * @param {string} [userData.phone] - User's phone (must be 10 digits if provided)
+ * @param {string} userData.password - User's password (required, min 8 chars with complexity)
  * @param {string} userData.role - User's role (required, must be in VALID_ROLES)
- * @param {string} userData.universityId - University ID (required for students, optional for others)
+ * @param {string} userData.universityId - University ID (required for students, 6 digits + 1 letter)
  * @returns {Object} - { valid: boolean, errors: string[] }
  */
 function validateUserCreation(userData) {
@@ -135,14 +153,19 @@ function validateUserCreation(userData) {
   if (!userData.email) {
     errors.push('Email is required');
   } else if (!validateEmail(userData.email)) {
-    errors.push('Invalid email format');
+    errors.push('Please enter a valid email address (e.g., name@gmail.com or name.23@uom.lk)');
+  }
+
+  // Validate phone
+  if (userData.phone && !validatePhone(userData.phone)) {
+    errors.push('Phone number must contain exactly 10 digits (e.g., 07XXXXXXXX)');
   }
 
   // Validate password
   if (!userData.password) {
     errors.push('Password is required');
   } else if (!validatePassword(userData.password)) {
-    errors.push('Password must be at least 6 characters long');
+    errors.push('Password must be at least 8 characters and include uppercase, lowercase, number, and special character');
   }
 
   // Validate role (STRICT - must be in whitelist)
@@ -157,7 +180,7 @@ function validateUserCreation(userData) {
     if (!userData.universityId) {
       errors.push('University ID is required for students');
     } else if (!validateUniversityId(userData.universityId)) {
-      errors.push('Invalid University ID format (must be alphanumeric, at least 3 characters)');
+      errors.push('University ID must contain 6 numbers followed by 1 letter');
     }
   }
 

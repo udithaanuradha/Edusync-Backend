@@ -31,7 +31,17 @@ const createAnnouncement = (req, res) => {
     req.body.postedBy
   ) || 'System';
   
-  const authorId = req.body.author_id || req.user?.id || null;
+  // The coordinator form sends `coordinator_id` and the supervisor form sends
+  // `supervisor_id` (not `author_id`) — both were silently ignored before,
+  // so every coordinator/supervisor announcement was saved with
+  // author_id = NULL. Accept them as a fallback; `author_id` (what
+  // AdminAnnouncements.tsx already sends) still wins whenever it's present,
+  // so nothing already working changes.
+  const authorId = req.body.author_id
+    || req.body.coordinator_id
+    || req.body.supervisor_id
+    || req.user?.id
+    || null;
 
   if (!title || !message) {
     return res.status(400).json({ error: 'Title and message are required' });
@@ -113,50 +123,67 @@ const getAnnouncements = (req, res) => {
       return res.status(500).json({ error: 'Database setup failed' });
     }
 
-    let query = `SELECT * FROM announcements`;
+    let whereConditions = [];
     let params = [];
 
     // 1. Fetch all announcements for management page (all_audience=true)
     if (allAudienceOnly) {
-      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+      // no filter
     }
     // 2. Fetch announcements by author name
     else if (authorName) {
-      query = `SELECT * FROM announcements WHERE author_name = ? ORDER BY created_at DESC`;
+      whereConditions.push('author_name = ?');
       params.push(authorName);
     }
     // 3. SUPER ADMIN: Sees absolutely every announcement
     else if (userRole && userRole.toLowerCase() === 'admin') {
-      query = `SELECT * FROM announcements ORDER BY created_at DESC`;
+      // admin sees all
     }
     // 4. COORDINATOR: Uses "Rule of Relevance"
     else if (userRole && userRole.toLowerCase() === 'coordinator') {
-      query = `SELECT * FROM announcements WHERE (LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?) ORDER BY created_at DESC`;
+      whereConditions.push(`(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?)`);
       params.push('%coordinator%');
     }
     // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
     else if (userRole) {
       const normalizedRole = normalizeAudience(userRole);
-      query = `SELECT * FROM announcements WHERE (LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
+      let roleCondition = `(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
       params.push(`%${normalizedRole}%`);
 
       if (userLevel) {
-        query += ` OR LOWER(target_audience) LIKE ?`;
+        roleCondition += ` OR LOWER(target_audience) LIKE ?`;
         params.push(`%level${userLevel}%`);
       }
       
-      query += `) ORDER BY created_at DESC`;
+      roleCondition += `)`;
+      whereConditions.push(roleCondition);
     }
     // 6. Fallback: No valid parameters provided
     else {
-      query = `SELECT * FROM announcements WHERE LOWER(target_audience) IN ('all', 'all system users') ORDER BY created_at DESC`;
+      whereConditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
     }
 
     // Exclude current user's own posts from dashboard view
     if (currentUserId && currentUserId > 0 && !allAudienceOnly && !authorName) {
-      query = query.replace(' ORDER BY created_at DESC', ` AND (author_id IS NULL OR author_id != ?) ORDER BY created_at DESC`);
+      whereConditions.push(`(author_id IS NULL OR author_id != ?)`);
       params.push(currentUserId);
     }
+
+    // Join the author's current role/designation from `users` via author_id.
+    // Purely additive — two extra columns in the response, no change to any
+    // of the WHERE-clause filtering above, so every existing caller
+    // (AdminAnnouncements, the coordinator/supervisor Announcements
+    // components, AnnouncementWidget) keeps working exactly as before and
+    // just gets two fields it doesn't look at.
+    let query = `
+      SELECT announcements.*, author_u.role AS author_role, author_u.designation AS author_designation
+      FROM announcements
+      LEFT JOIN users author_u ON author_u.id = announcements.author_id
+    `;
+    if (whereConditions.length > 0) {
+      query += ` WHERE ` + whereConditions.join(' AND ');
+    }
+    query += ` ORDER BY announcements.created_at DESC`;
 
     console.log('[getAnnouncements] Query:', query, 'Params:', params);
 
