@@ -4,6 +4,7 @@ const {
   createMilestone,
   getMilestonesByGroup,
   updateMilestoneStatus,
+  updateMilestoneDetails,
   getUnseenFeedbackCount,
   markGroupFeedbackSeen,
   deleteMilestone,
@@ -15,7 +16,12 @@ const {
   updateTaskStatus,
   deleteTask,
   upsertOverview,
-  getOverviewByGroup
+  getOverviewByGroup,
+  getScopeSectionsByMilestone,
+  createScopeSection,
+  claimScopeSection,
+  updateScopeSection,
+  deleteScopeSection
 } = require('../controllers/milestoneController');
 
  
@@ -37,6 +43,9 @@ router.get('/group/:groupId', getMilestonesByGroup);
 // Update milestone status (PENDING, REJECTED, APPROVED) and feedback
 router.put('/:id/status', updateMilestoneStatus);
 
+// Edit an existing milestone's own details (title/description/dates) — leader-only
+router.put('/:id', updateMilestoneDetails);
+
 // Count of unseen supervisor feedback items across all of a student's groups
 // (backs the red notification badge in Header.tsx)
 router.get('/feedback/unseen-count/:studentId', getUnseenFeedbackCount);
@@ -49,7 +58,25 @@ router.delete('/:id', deleteMilestone);
 
 
 
- 
+// SCOPE DIVISION ROUTES
+
+// List a milestone's scope sections (with claimant name resolved)
+router.get('/:milestoneId/scope', getScopeSectionsByMilestone);
+
+// Define a new scope section under a milestone (leader-only)
+router.post('/:milestoneId/scope', createScopeSection);
+
+// Claim a still-open scope section — atomic, any group member
+router.put('/scope/:id/claim', claimScopeSection);
+
+// Edit a scope section's title/description (leader-only)
+router.put('/scope/:id', updateScopeSection);
+
+// Delete a scope section entirely (leader-only)
+router.delete('/scope/:id', deleteScopeSection);
+
+
+
 // TASK ROUTES
  
 
