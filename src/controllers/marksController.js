@@ -408,8 +408,6 @@ const downloadMarksDistributionPdf = async (req, res) => {
         [
             `Total Students: ${n}`,
             `Mean: ${mean.toFixed(2)}%`,
-            `Median: ${median.toFixed(2)}%`,
-            `Standard Deviation: ${stdDev.toFixed(2)}`,
             `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
         ].forEach((line) => doc.text(line));
         doc.moveDown(1.5);
