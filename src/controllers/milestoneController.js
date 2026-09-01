@@ -493,7 +493,7 @@ const claimScopeSection = async (req, res) => {
     }
 
     const [sRows] = await dbPromise.query(
-      `SELECT s.id, m.group_id
+      `SELECT s.id, s.milestone_id, m.group_id
        FROM milestone_scope_sections s
        JOIN milestones m ON m.id = s.milestone_id
        WHERE s.id = ?`,
@@ -506,6 +506,19 @@ const claimScopeSection = async (req, res) => {
     if (userRole === 'student') {
       const isMember = await verifyMembership(userId, userRole, sRows[0].group_id);
       if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
+
+    // A student may only ever have ONE claimed section per milestone at a
+    // time — reject before attempting the atomic claim below.
+    const [existingClaim] = await dbPromise.query(
+      `SELECT id, title FROM milestone_scope_sections WHERE milestone_id = ? AND claimed_by = ? AND id != ?`,
+      [sRows[0].milestone_id, userId, id]
+    );
+    if (existingClaim.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `You've already claimed "${existingClaim[0].title}" in this milestone — you can only claim one section per milestone.`,
+      });
     }
 
     const [result] = await dbPromise.query(
