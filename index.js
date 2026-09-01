@@ -424,12 +424,34 @@ app.get("/api/projects/files/:stage_id", (req, res) => {
 app.get("/api/admin/stats", (req, res) => {
   db.query(
     `SELECT 
-      (SELECT COUNT(*) FROM users) as totalUsers,
-      (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
-      (SELECT COUNT(*) FROM users WHERE role = 'coordinator' OR designation = 'coordinator') as totalCoordinators,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR designation = 'supervisor' OR (role = 'lecturer' AND (designation IS NULL OR designation != 'coordinator'))) as totalSupervisors,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
-      (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
+      (SELECT COUNT(*) FROM users 
+        WHERE role IS NOT NULL 
+          AND role != 'admin' 
+          AND is_verified = 1 
+          AND (role != 'lecturer' OR designation IS NOT NULL)
+      ) as totalUsers,
+      (SELECT COUNT(*) FROM users 
+        WHERE role = 'student' 
+          AND is_verified = 1
+      ) as totalStudents,
+      (SELECT COUNT(*) FROM users 
+        WHERE is_verified = 1 
+          AND (role = 'coordinator' OR (role = 'lecturer' AND LOWER(TRIM(designation)) = 'coordinator') OR designation = 'coordinator')
+      ) as totalCoordinators,
+      (SELECT COUNT(*) FROM users 
+        WHERE role = 'lecturer' 
+          AND LOWER(TRIM(designation)) = 'supervisor' 
+          AND is_verified = 1
+      ) as totalSupervisors,
+      (SELECT COUNT(*) FROM users 
+        WHERE is_verified = 1 
+          AND role = 'lecturer' 
+          AND designation IS NOT NULL
+      ) as totalLecturers,
+      (SELECT COUNT(*) FROM users 
+        WHERE role = 'mentor' 
+          AND is_verified = 1
+      ) as totalMentors`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(results[0]);
@@ -440,8 +462,11 @@ app.get("/api/admin/stats", (req, res) => {
 app.get("/api/admin/recent-logins", (req, res) => {
   const query = `
     SELECT 
+      id,
       name as username, 
+      email,
       role, 
+      designation,
       DATE_FORMAT(CONVERT_TZ(last_login, '+00:00', '+05:30'), '%b %d, %h:%i %p') as time 
     FROM users 
     WHERE last_login IS NOT NULL 
@@ -565,3 +590,5 @@ try {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// touch 1788028337996

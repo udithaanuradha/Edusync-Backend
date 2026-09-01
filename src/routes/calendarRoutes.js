@@ -7,6 +7,7 @@ const {
     deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
+    unfreezeDate,
 } = require('../controllers/calendarController');
 
 // ---------------------------------------------------------
@@ -40,5 +41,6 @@ router.post('/freeze', freezeDate);
 // 4. FETCH FROZEN DATES (To put colored dots on the calendar)
 // ---------------------------------------------------------
 router.get('/frozen-dates', getFrozenDates);
+router.delete('/frozen-dates/:id', unfreezeDate);
 
 module.exports = router;

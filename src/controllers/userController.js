@@ -1,3 +1,4 @@
+const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const dbPromise = db.promise();
 
@@ -49,27 +50,139 @@ const searchSupervisors = (req, res) => {
   });
 };
 
-// Get Users by Role
-const getUsersByRole = (req, res) => {
+// Get Users by Role with rich activity data
+const getUsersByRole = async (req, res) => {
   const role = req.query.role;
-  const validRoles = ["student", "admin", "mentor", "lecturer"];
-  
-  if (!role || !validRoles.includes(role)) {
-    return res.status(400).json({ error: "Please provide a valid role." });
-  }
+  try {
+    let whereClause = "WHERE u.role NOT IN ('supervisor', 'coordinator') AND NOT (u.role = 'lecturer' AND u.designation IS NULL)";
+    let params = [];
 
-  const sql = `SELECT id, name, email, role FROM users WHERE role = ? ORDER BY name ASC LIMIT 100`;
-
-  db.query(sql, [role], (err, results) => {
-    if (err) {
-      console.error("Error fetching users by role:", err);
-      return res.status(500).json({ error: "Failed to fetch users." });
+    if (role && role !== 'all') {
+      if (role === 'lecturer') {
+        whereClause = "WHERE u.role = 'lecturer' AND u.designation IS NOT NULL";
+      } else {
+        whereClause = "WHERE u.role = ? AND u.role NOT IN ('supervisor', 'coordinator')";
+        params = [role];
+      }
     }
-    res.status(200).json(results);
-  });
+
+    const sql = `
+      SELECT 
+        u.id, 
+        u.name, 
+        u.email, 
+        u.role, 
+        u.designation, 
+        u.is_verified,
+        u.last_login,
+        u.created_at,
+        sub.last_submission,
+        sub.submission_count,
+        m.last_marking,
+        m.marking_count,
+        gm.joined_group_at,
+        ann.last_announcement,
+        msg.last_message_at
+      FROM users u
+      LEFT JOIN (
+        SELECT student_id, MAX(submitted_at) as last_submission, COUNT(*) as submission_count 
+        FROM student_submissions 
+        GROUP BY student_id
+      ) sub ON sub.student_id = u.id
+      LEFT JOIN (
+        SELECT marked_by, MAX(updated_at) as last_marking, COUNT(*) as marking_count 
+        FROM marks 
+        GROUP BY marked_by
+      ) m ON m.marked_by = u.id
+      LEFT JOIN (
+        SELECT student_id, MAX(created_at) as joined_group_at 
+        FROM project_group_members 
+        GROUP BY student_id
+      ) gm ON gm.student_id = u.id
+      LEFT JOIN (
+        SELECT author_id, MAX(created_at) as last_announcement 
+        FROM announcements 
+        GROUP BY author_id
+      ) ann ON ann.author_id = u.id
+      LEFT JOIN (
+        SELECT sender_id, MAX(created_at) as last_message_at 
+        FROM messages_v2 
+        GROUP BY sender_id
+      ) msg ON msg.sender_id = u.id
+      ${whereClause}
+      ORDER BY u.name ASC
+    `;
+
+    const [rows] = await dbPromise.query(sql, params);
+
+    const enriched = rows.map(u => {
+      let latestAction = 'Enrolled User';
+      let latestTime = u.created_at || new Date().toISOString();
+      let hasAction = false;
+
+      if (u.created_at) {
+        latestAction = 'Account Created';
+        latestTime = u.created_at;
+      }
+
+      if (u.joined_group_at && (!latestTime || new Date(u.joined_group_at) > new Date(latestTime))) {
+        latestAction = 'Joined Project Group';
+        latestTime = u.joined_group_at;
+        hasAction = true;
+      }
+
+      if (u.last_message_at && (!latestTime || new Date(u.last_message_at) > new Date(latestTime))) {
+        latestAction = 'Sent Chat Message';
+        latestTime = u.last_message_at;
+        hasAction = true;
+      }
+
+      if (u.last_announcement && (!latestTime || new Date(u.last_announcement) > new Date(latestTime))) {
+        latestAction = 'Published Announcement';
+        latestTime = u.last_announcement;
+        hasAction = true;
+      }
+
+      if (u.last_marking && (!latestTime || new Date(u.last_marking) > new Date(latestTime))) {
+        latestAction = `Graded Submissions (${u.marking_count})`;
+        latestTime = u.last_marking;
+        hasAction = true;
+      }
+
+      if (u.last_submission && (!latestTime || new Date(u.last_submission) > new Date(latestTime))) {
+        latestAction = `Milestone Submitted (${u.submission_count})`;
+        latestTime = u.last_submission;
+        hasAction = true;
+      }
+
+      if (u.last_login && (!latestTime || new Date(u.last_login) > new Date(latestTime))) {
+        latestAction = 'Logged In to Portal';
+        latestTime = u.last_login;
+        hasAction = true;
+      }
+
+      return {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        designation: u.designation,
+        is_verified: u.is_verified,
+        last_login: u.last_login,
+        created_at: u.created_at,
+        last_action: hasAction ? latestAction : (u.last_login ? 'Logged In to Portal' : 'Enrolled User'),
+        last_action_time: latestTime,
+        has_logged_in: Boolean(u.last_login)
+      };
+    });
+
+    res.status(200).json(enriched);
+  } catch (err) {
+    console.error("Error fetching users by role:", err);
+    res.status(500).json({ error: "Failed to fetch users." });
+  }
 };
 
-// Get Students by Level
 const getStudentsByLevel = async (req, res) => {
   const level = req.params.level;
   const studentId = req.query.studentId;
@@ -216,10 +329,6 @@ const getUserProfile = async (req, res) => {
         [requesterId, targetId]
       );
 
-      // Not a shared-member match — also allow a requester to view the
-      // supervisor or mentor assigned to their own group (still scoped to
-      // groups the requester actually belongs to, never an arbitrary
-      // supervisor/mentor outside of it).
       let isOwnGroupSupervisorOrMentor = false;
       if (shared.length === 0) {
         const [assigned] = await dbPromise.query(
@@ -248,10 +357,6 @@ const getUserProfile = async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found.' });
     }
 
-    // project_group_members only has student rows, so this naturally comes
-    // back empty for a supervisor/mentor profile — a student can belong to
-    // more than one group (e.g. across levels), so this returns all of them
-    // rather than assuming exactly one.
     const [groupRows] = await dbPromise.query(
       `SELECT pg.id AS group_id, pg.group_name, pg.level
        FROM project_group_members gm
@@ -268,7 +373,146 @@ const getUserProfile = async (req, res) => {
   }
 };
 
+// Update user personal profile
+const updateUserProfile = async (req, res) => {
+  const { userId, name, phone, designation } = req.body;
+  if (!userId) {
+    return res.status(400).json({ success: false, error: 'User ID is required.' });
+  }
+
+  try {
+    const trimmedName = name ? String(name).trim() : null;
+    const trimmedPhone = phone !== undefined ? (phone ? String(phone).trim() : '') : null;
+    const trimmedDesignation = designation !== undefined ? (designation ? String(designation).trim() : null) : null;
+
+    let updateFields = [];
+    let params = [];
+
+    if (trimmedName) {
+      updateFields.push('name = ?');
+      params.push(trimmedName);
+    }
+    if (trimmedPhone !== null) {
+      updateFields.push('phone = ?');
+      params.push(trimmedPhone);
+    }
+    if (trimmedDesignation !== null) {
+      updateFields.push('designation = ?');
+      params.push(trimmedDesignation);
+    }
+
+    if (updateFields.length === 0) {
+      return res.status(400).json({ success: false, error: 'No fields to update.' });
+    }
+
+    params.push(userId);
+    const sql = `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`;
+    await dbPromise.query(sql, params);
+
+    const [updatedRows] = await dbPromise.query(
+      `SELECT id, name, email, role, designation, level, academic_unit, phone, university_id, is_verified FROM users WHERE id = ?`,
+      [userId]
+    );
+
+    if (updatedRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully!',
+      user: updatedRows[0]
+    });
+  } catch (err) {
+    console.error('Error updating user profile:', err);
+    res.status(500).json({ success: false, error: 'Failed to update profile.' });
+  }
+};
+
+// Change user password
+const changeUserPassword = async (req, res) => {
+  const { userId, currentPassword, newPassword } = req.body;
+
+  if (!userId || !currentPassword || !newPassword) {
+    return res.status(400).json({ success: false, error: 'All fields are required.' });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long.' });
+  }
+
+  try {
+    const [rows] = await dbPromise.query(
+      `SELECT id, password FROM users WHERE id = ?`,
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+
+    const dbPassword = rows[0].password || '';
+    const isHashed = dbPassword.startsWith('$2a$') || dbPassword.startsWith('$2b$') || dbPassword.startsWith('$2y$');
+
+    let isMatch = false;
+    if (isHashed) {
+      isMatch = await bcrypt.compare(currentPassword, dbPassword);
+    } else {
+      isMatch = (currentPassword === dbPassword);
+    }
+
+    if (!isMatch) {
+      return res.status(400).json({ success: false, error: 'Current password does not match.' });
+    }
+
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    await dbPromise.query(
+      `UPDATE users SET password = ? WHERE id = ?`,
+      [hashedPassword, userId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Password changed successfully!'
+    });
+  } catch (err) {
+    console.error('Error changing password:', err);
+    res.status(500).json({ success: false, error: 'Failed to change password.' });
+  }
+};
+
+
+// Verify Single User
+const verifyUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'User ID is required.' });
+    }
+    await dbPromise.query('UPDATE users SET is_verified = 1 WHERE id = ?', [id]);
+    return res.status(200).json({ success: true, message: 'User verified successfully.' });
+  } catch (err) {
+    console.error('Error verifying user:', err);
+    return res.status(500).json({ success: false, error: 'Failed to verify user.' });
+  }
+};
+
+// Verify All Unverified Users
+const verifyAllUsers = async (req, res) => {
+  try {
+    const [result] = await dbPromise.query('UPDATE users SET is_verified = 1 WHERE is_verified = 0 OR is_verified IS NULL');
+    return res.status(200).json({ success: true, message: 'All pending accounts verified successfully.', affectedRows: result.affectedRows });
+  } catch (err) {
+    console.error('Error verifying all users:', err);
+    return res.status(500).json({ success: false, error: 'Failed to verify all users.' });
+  }
+};
+
 module.exports = {
+    verifyUser,
+    verifyAllUsers,
   searchStudentForGroup,
   searchSupervisors,
   getUsersByRole,
@@ -277,4 +521,6 @@ module.exports = {
   assignCoordinator,
   removeCoordinator,
   getUserProfile,
+  updateUserProfile,
+  changeUserPassword,
 };
