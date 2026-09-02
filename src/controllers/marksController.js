@@ -204,6 +204,29 @@ const computeLevelMarksSummary = async (level) => {
               )
             : [[]];
 
+        // Which groups' "Final" evaluation panel has been marked complete by
+        // the coordinator (SupervisorReportPanel.tsx's "Complete" action ->
+        // completePanelsForGroups in calendarController.js, which sets
+        // evaluation_panels.status = 'completed' scoped to that group + the
+        // stage named "Final"). This is the existing signal the student Marks
+        // tab uses to know the Evaluation Panel has officially released final
+        // marks — read defensively since the `status` column self-heals lazily
+        // elsewhere and may not exist yet on a fresh environment, in which
+        // case no group's final marks are considered released.
+        let finalReleasedGroups = new Set();
+        try {
+            const [finalPanels] = await db.promise().query(
+                `SELECT DISTINCT target_group FROM evaluation_panels
+                 WHERE academic_level = ? AND status = 'completed' AND LOWER(TRIM(evaluation_type)) = 'final'`,
+                [level]
+            );
+            finalReleasedGroups = new Set(
+                finalPanels.map((p) => String(p.target_group || '').trim().toLowerCase())
+            );
+        } catch (error) {
+            console.warn('evaluation_panels final-release check failed (treating as not released):', error.message);
+        }
+
         // Build structured summary per student
         const summary = students.map((student) => {
             const studentMarks = allMarks.filter((m) => m.student_id === student.student_id);
@@ -284,7 +307,12 @@ const computeLevelMarksSummary = async (level) => {
                 sum_total_max_marks: Number(sumTotalMaxMarks.toFixed(2)),
                 final_mark: finalPercentage,
                 stages_completed: stagesEvaluatedCount,
-                total_stages: canonicalStages.length
+                total_stages: canonicalStages.length,
+                // True once the coordinator has marked the "Final" stage's
+                // evaluation panel complete for this student's group — see
+                // finalReleasedGroups above. Additive field only; does not
+                // change how final_mark/sum_obtained_marks/etc. are computed.
+                final_marks_released: finalReleasedGroups.has(String(student.group_name || '').trim().toLowerCase())
             };
         });
 
@@ -380,8 +408,6 @@ const downloadMarksDistributionPdf = async (req, res) => {
         [
             `Total Students: ${n}`,
             `Mean: ${mean.toFixed(2)}%`,
-            `Median: ${median.toFixed(2)}%`,
-            `Standard Deviation: ${stdDev.toFixed(2)}`,
             `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
         ].forEach((line) => doc.text(line));
         doc.moveDown(1.5);

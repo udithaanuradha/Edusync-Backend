@@ -612,6 +612,29 @@ const createGroup = async (req, res) => {
     const [groupInsert] = await connection.query(insertQuery, insertValues);
 
     const groupId = groupInsert.insertId;
+
+    // NEW: defense-in-depth — reject if any member being added here already
+    // belongs to a different, already-existing group. createGroupRequest
+    // checks this earlier in the flow, but this step can in principle run
+    // on its own, so it's checked again right before the members are
+    // actually inserted.
+    const [alreadyGroupedAtCreate] = await connection.query(
+      `SELECT pm.student_id
+       FROM project_group_members pm
+       JOIN project_groups pg ON pg.id = pm.group_id
+       WHERE pm.student_id IN (?)
+         AND pg.id != ?`,
+      [memberIds, groupId]
+    );
+    if (alreadyGroupedAtCreate.length > 0) {
+      await connection.rollback();
+      return res.status(400).json({
+        success: false,
+        error: 'One or more members already belong to another group.',
+        already_grouped_member_ids: alreadyGroupedAtCreate.map((m) => m.student_id),
+      });
+    }
+
     const memberRows = memberIds.map((id) => [groupId, id, id === leaderId ? 1 : 0]);
 
     await connection.query(
@@ -906,6 +929,67 @@ const getSupervisors = async (req, res) => {
   }
 };
 
+/**
+ * GET: Students at a given level (same department as the requester) who are
+ * NOT already an active member of a real, live group — used to populate the
+ * "Add Group Members" picker so an already-grouped student can no longer be
+ * selected into a second group.
+ *
+ * This is intentionally separate from getStudentsByLevel (userController.js),
+ * which the coordinator's Group Management page still uses, unchanged — that
+ * page needs to see every student regardless of group status, so its query
+ * was left exactly as it was.
+ */
+const getAvailableMembersForLevel = async (req, res) => {
+  const level = req.params.level;
+  const studentId = req.query.studentId;
+
+  if (!level) {
+    return res.status(400).json({ error: 'Please provide an Academic Level.' });
+  }
+
+  try {
+    let department = null;
+    if (studentId) {
+      const [requesterRows] = await dbPromise.query(
+        `SELECT academic_unit FROM users WHERE id = ? AND role = 'student'`,
+        [studentId]
+      );
+      if (requesterRows.length === 0) {
+        return res.status(404).json({ error: 'Requesting student not found.' });
+      }
+      department = requesterRows[0].academic_unit;
+    }
+
+    const params = [level];
+    let sql = `
+      SELECT id, name, university_id, academic_unit AS department, level
+      FROM users
+      WHERE role = 'student' AND level = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM project_group_members pm
+          JOIN project_groups pg ON pg.id = pm.group_id
+          WHERE pm.student_id = users.id AND pg.id IS NOT NULL
+        )
+    `;
+
+    if (studentId) {
+      sql += ` AND id != ?`;
+      params.push(studentId);
+      sql += ` AND academic_unit ${department === null ? 'IS NULL' : '= ?'}`;
+      if (department !== null) params.push(department);
+    }
+
+    sql += ` ORDER BY name ASC`;
+
+    const [results] = await dbPromise.query(sql, params);
+    res.status(200).json(results);
+  } catch (err) {
+    console.error('Error fetching available members for level:', err);
+    res.status(500).json({ error: 'Failed to fetch available members.' });
+  }
+};
+
 
 
 
@@ -965,6 +1049,24 @@ const createGroupRequest = async (req, res) => {
         return res.status(400).json({
           error: `All members must be in the same department (${studentDepartment}) and level (${studentLevel}) as you.`,
           invalid_member_ids: mismatched.map((m) => m.id),
+        });
+      }
+
+      // NEW: reject if any selected member already belongs to a real, live
+      // group. Mirrors the existing "already a member" check just below
+      // this block, which only covers the requester themselves.
+      const [membersAlreadyGrouped] = await dbPromise.query(
+        `SELECT pm.student_id
+         FROM project_group_members pm
+         JOIN project_groups pg ON pg.id = pm.group_id
+         WHERE pm.student_id IN (?)
+           AND pg.id IS NOT NULL`,
+        [member_ids]
+      );
+      if (membersAlreadyGrouped.length > 0) {
+        return res.status(400).json({
+          error: 'One or more selected members already belong to a group.',
+          already_grouped_member_ids: membersAlreadyGrouped.map((m) => m.student_id),
         });
       }
     }
@@ -1559,6 +1661,7 @@ module.exports = {
   getCoordinatorGroups,
   getGroupMembers,
   getSupervisors,
+  getAvailableMembersForLevel,
   createGroupRequest,
   finalSubmitRequest,
   approveGroupRequest,

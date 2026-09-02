@@ -296,12 +296,33 @@ const getStudentSummary = async (req, res) => {
       LIMIT 5
     `;
 
+    // The student's own active group — students can only ever belong to one
+    // live group at a time (see groupController.js's already-grouped-member
+    // checks), so there's no real "which project" ambiguity to resolve here.
+    // Ordered the same way recentProjectsQuery above is, so if a stale extra
+    // group row ever exists the summary cards below stay scoped to the same
+    // project "Recent Projects" surfaces first.
+    const activeGroupQuery = `
+      SELECT pg.id AS groupId
+      FROM project_groups pg
+      JOIN project_group_members gm ON gm.group_id = pg.id
+      LEFT JOIN (
+        SELECT group_id, MAX(created_at) AS last_activity
+        FROM marks WHERE mark_type = 'stage' GROUP BY group_id
+      ) progress ON progress.group_id = pg.id
+      WHERE gm.student_id = ?
+      ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
+      LIMIT 1
+    `;
+
     const [
       [recentProjectsRows],
       [upcomingDeadlinesRows],
+      [activeGroupRows],
     ] = await Promise.all([
       db.promise().query(recentProjectsQuery, [studentId]),
       db.promise().query(upcomingDeadlinesQuery, [studentId]),
+      db.promise().query(activeGroupQuery, [studentId]),
     ]);
 
     const recentProjects = Array.isArray(recentProjectsRows)
@@ -327,11 +348,75 @@ const getStudentSummary = async (req, res) => {
         }))
       : [];
 
+    // Dashboard Overview's 5 summary cards (MyProjectStatus.tsx). Scoped to
+    // the same active group as everything above — Completion and Tasks Done
+    // share one task dataset (the group's full student_tasks list, same as
+    // the Project Management task board's getTasksByGroup) so the percentage
+    // always matches the completed/total ratio shown. Delayed reuses the
+    // exact same overdue predicate as getMentorProjectDelays
+    // (mentorController.js). Deadline reuses upcomingDeadlines above rather
+    // than a separate query — it's just that array's soonest entry.
+    const activeGroupId = activeGroupRows?.[0]?.groupId || null;
+
+    let stats = {
+      completionPercent: null,
+      completedTasksCount: 0,
+      totalTasksCount: 0,
+      delayedCount: 0,
+      membersCount: 0,
+    };
+
+    if (activeGroupId) {
+      const [
+        [taskStatsRows],
+        [delayedRows],
+        [memberRows],
+      ] = await Promise.all([
+        db.promise().query(
+          `SELECT
+             COUNT(*) AS totalTasksCount,
+             SUM(CASE WHEN UPPER(TRIM(t.status)) = 'COMPLETED' THEN 1 ELSE 0 END) AS completedTasksCount
+           FROM student_tasks t
+           JOIN milestones m ON t.milestone_id = m.id
+           WHERE m.group_id = ?`,
+          [activeGroupId]
+        ),
+        db.promise().query(
+          `SELECT COUNT(*) AS delayedCount
+           FROM student_tasks t
+           JOIN milestones m ON t.milestone_id = m.id
+           WHERE m.group_id = ?
+             AND UPPER(TRIM(t.status)) != 'COMPLETED'
+             AND t.due_date IS NOT NULL
+             AND t.due_date < CURRENT_DATE`,
+          [activeGroupId]
+        ),
+        db.promise().query(
+          `SELECT COUNT(*) AS membersCount FROM project_group_members WHERE group_id = ?`,
+          [activeGroupId]
+        ),
+      ]);
+
+      const totalTasksCount = toNumber(taskStatsRows?.[0]?.totalTasksCount);
+      const completedTasksCount = toNumber(taskStatsRows?.[0]?.completedTasksCount);
+
+      stats = {
+        completionPercent: totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100) : null,
+        completedTasksCount,
+        totalTasksCount,
+        delayedCount: toNumber(delayedRows?.[0]?.delayedCount),
+        membersCount: toNumber(memberRows?.[0]?.membersCount),
+      };
+    }
+
+    const nearestDeadline = upcomingDeadlines.length > 0 ? upcomingDeadlines[0] : null;
+
     res.json({
       success: true,
       data: {
         recentProjects,
         upcomingDeadlines,
+        stats: { ...stats, nearestDeadline },
       },
     });
   } catch (error) {

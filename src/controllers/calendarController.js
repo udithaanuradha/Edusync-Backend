@@ -206,9 +206,24 @@ const getUpcomingPanels = async (req, res) => {
     try {
         await ensureEvaluationPanelStatusColumn();
 
-        const query = `SELECT * FROM evaluation_panels
-                        WHERE panel_date >= CURRENT_DATE AND status != 'completed'
-                        ORDER BY panel_date ASC, start_time ASC`;
+        const query = `
+            SELECT 
+                ep.*,
+                pg.department,
+                pg.supervisor_id,
+                pg.supervisor_id_2,
+                u1.name as group_supervisor_name,
+                u2.name as group_supervisor_name_2
+            FROM evaluation_panels ep
+            LEFT JOIN project_groups pg ON (
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group)) 
+                AND pg.level = ep.academic_level
+            )
+            LEFT JOIN users u1 ON u1.id = pg.supervisor_id
+            LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
+            WHERE ep.panel_date >= CURRENT_DATE AND ep.status != 'completed'
+            ORDER BY ep.panel_date ASC, ep.start_time ASC
+        `;
 
         // Await the rows from the database and forward them to the client.
         const [results] = await db.promise().query(query);
@@ -219,20 +234,6 @@ const getUpcomingPanels = async (req, res) => {
     }
 };
 
-/**
- * Coordinator-driven completion, called from the Reports/Gradebook marksheet
- * (SupervisorReportPanel.tsx). Proposal/Interim/Code Review/Final each
- * happen at genuinely different points in the year for a given group, so
- * completion is scoped per (group, stage) — NOT deferred until Final —
- * otherwise an already-finished Proposal panel from months ago would keep
- * sitting on the calendar as "upcoming" until Final finally happens.
- *
- * `stageName` is optional for backward compatibility: if provided, only that
- * group's panel for that specific stage is completed (the normal case, one
- * "Complete" click per stage cell); if omitted, every still-scheduled panel
- * for the given group(s) is completed regardless of stage.
- * Expects body: { level, groupNames: string[], stageName?: string }
- */
 const completePanelsForGroups = async (req, res) => {
     const { level, groupNames, stageName } = req.body;
     const academicLevel = Number(level);
@@ -309,7 +310,7 @@ const freezeDate = async (req, res) => {
  */
 const getFrozenDates = async (req, res) => {
     try {
-        const query = 'SELECT * FROM frozen_dates ORDER BY frozen_date ASC';
+        const query = 'SELECT id, DATE_FORMAT(frozen_date, "%Y-%m-%d") as frozen_date, reason, type, created_by, created_at FROM frozen_dates ORDER BY frozen_date ASC';
         const [results] = await db.promise().query(query);
 
         res.status(200).json(results);
@@ -319,7 +320,23 @@ const getFrozenDates = async (req, res) => {
     }
 };
 
+
+/**
+ * Remove a frozen date by id or date string
+ */
+const unfreezeDate = async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.promise().query('DELETE FROM frozen_dates WHERE id = ? OR frozen_date = ?', [id, id]);
+        res.status(200).json({ message: 'Frozen date removed successfully.' });
+    } catch (error) {
+        console.error('Database error (unfreezeDate):', error);
+        res.status(500).json({ error: 'Failed to unfreeze date' });
+    }
+};
+
 module.exports = {
+    unfreezeDate,
     scheduleEvaluationPanel,
     updateEvaluationPanel,
     getUpcomingPanels,

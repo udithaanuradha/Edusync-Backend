@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const MessageV2Controller = require('../controllers/messageV2Controller');
 
+router.get('/unread-total', MessageV2Controller.getUnreadTotal);
 router.get('/conversations', MessageV2Controller.getConversations);
 router.get('/recipients', MessageV2Controller.getRecipients);
 router.get('/', MessageV2Controller.getMessageHistory);
