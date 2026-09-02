@@ -31,13 +31,6 @@ exports.getMentorStages = async (req, res) => {
   const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'];
   const groupId = req.query.groupId || req.params.groupId;
 
-  if (level === 1) {
-    return res.status(403).json({
-      success: false,
-      message: 'Industry mentors are not assigned to Level 1 stages.',
-    });
-  }
-
   try {
     // 1. Find assigned group for this mentor at this level
     let assignedGroup = null;
@@ -46,8 +39,11 @@ exports.getMentorStages = async (req, res) => {
       if (groups.length > 0) assignedGroup = groups[0];
     } else if (mentorId) {
       const [groups] = await queryWithRetry(
-        'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
-        [mentorId, level]
+        `SELECT DISTINCT pg.* FROM project_groups pg
+         LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+         WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?) AND pg.level = ?
+         ORDER BY pg.id DESC`,
+        [mentorId, mentorId, level]
       );
       if (groups.length > 0) assignedGroup = groups[0];
     }
@@ -112,11 +108,9 @@ exports.getMentorStages = async (req, res) => {
   }
 };
 
-// ── 2. JS helper — filter Level 1 announcements out of a list ────────────────
+// ── 2. JS helper ─────────────────────────────────────────────────────────────
 exports.filterLevel1FromMentorAnnouncements = (announcements) => {
-  return announcements.filter(
-    (a) => !LEVEL1_AUDIENCES.includes((a.target_audience || '').trim())
-  );
+  return announcements;
 };
 
 // ── 3. Standalone mentor announcements endpoint ──────────────────────────────
@@ -130,29 +124,26 @@ exports.getMentorAnnouncements = async (req, res) => {
 
     if (mentorId) {
       const [groups] = await queryWithRetry(
-        `SELECT id, group_name, level, department FROM project_groups WHERE mentor_id = ?`,
-        [mentorId]
+        `SELECT DISTINCT pg.id, pg.group_name, pg.level, pg.department 
+         FROM project_groups pg
+         LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+         WHERE pg.mentor_id = ? OR pgm.mentor_id = ?`,
+        [mentorId, mentorId]
       );
       assignedGroups = groups || [];
-      assignedLevels = Array.from(new Set(assignedGroups.map((g) => Number(g.level)).filter((lvl) => lvl > 1)));
+      assignedLevels = Array.from(new Set(assignedGroups.map((g) => Number(g.level)).filter((lvl) => !isNaN(lvl) && lvl >= 1)));
       assignedDepartments = Array.from(new Set(assignedGroups.map((g) => g.department).filter(Boolean)));
     }
 
     // Build smart where conditions for Mentor:
-    // 1. Never show Level 1
-    // 2. Always show general/system announcements ('All', 'All system users')
-    // 3. Always show announcements targeted to 'mentor' / 'mentors'
-    // 4. Show announcements for assigned levels (e.g. Level 2)
-    // 5. Show announcements for assigned groups (e.g. Cygen 123)
-    // 6. Show announcements authored by this mentor
+    // 1. Always show general/system announcements ('All', 'All system users')
+    // 2. Always show announcements targeted to 'mentor' / 'mentors'
+    // 3. Show announcements for assigned levels (e.g. Level 1, Level 2)
+    // 4. Show announcements for assigned groups
+    // 5. Show announcements authored by this mentor
 
     let whereClauses = [];
     let params = [];
-
-    // Exclude Level 1 strictly
-    whereClauses.push(
-      `(LOWER(a.target_audience) NOT LIKE '%level1%' AND LOWER(a.target_audience) NOT LIKE '%level 1%' OR a.target_audience IS NULL)`
-    );
 
     let relevanceConditions = [
       `LOWER(a.target_audience) IN ('all', 'all system users')`,
@@ -223,12 +214,6 @@ exports.getMentorAnnouncementById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Announcement not found.' });
     }
     const announcement = results[0];
-    if (LEVEL1_AUDIENCES.includes((announcement.target_audience || '').trim())) {
-      return res.status(403).json({
-        success: false,
-        message: 'Industry mentors cannot access Level 1 announcements.',
-      });
-    }
     res.json({ success: true, data: announcement });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -253,8 +238,11 @@ exports.createMentorAnnouncement = async (req, res) => {
         mentorName = users[0].name;
       }
       const [groups] = await queryWithRetry(
-        'SELECT id, group_name, level FROM project_groups WHERE mentor_id = ?',
-        [mentorId]
+        `SELECT DISTINCT pg.id, pg.group_name, pg.level 
+         FROM project_groups pg
+         LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+         WHERE pg.mentor_id = ? OR pgm.mentor_id = ?`,
+        [mentorId, mentorId]
       );
       assignedGroups = groups || [];
     }
@@ -373,20 +361,17 @@ exports.getMentorGroups = async (req, res) => {
   }
 
   const numLevel = Number(level);
-  // Industry mentors are strictly not assigned to Level 1 stages or groups
-  if (numLevel === 1) {
-    return res.json({ success: true, data: [] });
-  }
 
   try {
-    let query = `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
+    let query = `SELECT DISTINCT pg.id AS groupId, pg.group_name AS groupName, pg.department AS department, pg.level, pg.created_at AS createdAt,
               sup.id AS supervisorId, sup.name AS supervisorName, sup.email AS supervisorEmail
        FROM project_groups pg
+       LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
        LEFT JOIN users sup ON sup.id = pg.supervisor_id
-       WHERE pg.mentor_id = ? AND pg.level > 1`;
-    const queryParams = [mentorId];
+       WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?)`;
+    const queryParams = [mentorId, mentorId];
 
-    if (level && !isNaN(numLevel) && numLevel > 1) {
+    if (level && !isNaN(numLevel) && numLevel >= 1) {
       query += ' AND pg.level = ?';
       queryParams.push(numLevel);
     }
@@ -501,7 +486,13 @@ exports.getMentorDashboard = (req, res) => {
 exports.getMentorStats = async (req, res) => {
   const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
-    const [groups] = await queryWithRetry('SELECT COUNT(*) as count FROM project_groups WHERE mentor_id = ? AND level > 1', [mentorId]);
+    const [groups] = await queryWithRetry(
+      `SELECT COUNT(DISTINCT pg.id) as count 
+       FROM project_groups pg 
+       LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+       WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?)`,
+      [mentorId, mentorId]
+    );
     res.json({ success: true, data: { assignedGroupsCount: groups[0]?.count || 0 } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -512,8 +503,11 @@ exports.getMentorProjects = async (req, res) => {
   const mentorId = req.params.mentorId || req.query.mentorId || req.headers['x-user-id'];
   try {
     const [groups] = await queryWithRetry(
-      'SELECT id, group_name as name, department, level, created_at FROM project_groups WHERE mentor_id = ? AND level > 1',
-      [mentorId]
+      `SELECT DISTINCT pg.id, pg.group_name as name, pg.department, pg.level, pg.created_at 
+       FROM project_groups pg 
+       LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+       WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?)`,
+      [mentorId, mentorId]
     );
     res.json({ success: true, data: groups });
   } catch (err) {
@@ -716,13 +710,6 @@ exports.getMentorSubmissions = async (req, res) => {
   const mentorId = req.query.mentorId || req.params.mentorId || req.headers['x-user-id'];
   const groupId = req.query.groupId || req.params.groupId;
 
-  if (level === 1) {
-    return res.status(403).json({
-      success: false,
-      message: 'Industry mentors are not assigned to Level 1 student submissions.',
-    });
-  }
-
   try {
     // 1. Find assigned group for this mentor at this level
     let assignedGroup = null;
@@ -731,8 +718,11 @@ exports.getMentorSubmissions = async (req, res) => {
       if (groups.length > 0) assignedGroup = groups[0];
     } else if (mentorId) {
       const [groups] = await queryWithRetry(
-        'SELECT * FROM project_groups WHERE mentor_id = ? AND level = ? ORDER BY id DESC',
-        [mentorId, level]
+        `SELECT DISTINCT pg.* FROM project_groups pg
+         LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+         WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?) AND pg.level = ?
+         ORDER BY pg.id DESC`,
+        [mentorId, mentorId, level]
       );
       if (groups.length > 0) assignedGroup = groups[0];
     }
@@ -821,10 +811,11 @@ exports.getMentorCalendarEvents = async (req, res) => {
   try {
     // 1. Fetch assigned groups for this mentor
     const [groups] = await queryWithRetry(
-      `SELECT id, group_name, level, department, created_by
-       FROM project_groups
-       WHERE mentor_id = ? AND level > 1`,
-      [mentorId]
+      `SELECT DISTINCT pg.id, pg.group_name, pg.level, pg.department, pg.created_by
+       FROM project_groups pg
+       LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+       WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?)`,
+      [mentorId, mentorId]
     );
 
     if (groups.length === 0) {
@@ -910,12 +901,13 @@ exports.getMentorProjectDelays = async (req, res) => {
 
   try {
     // 1. Get all assigned project groups for this mentor
-    let groupQuery = `SELECT pg.id, pg.group_name, pg.level, pg.department 
+    let groupQuery = `SELECT DISTINCT pg.id, pg.group_name, pg.level, pg.department 
                       FROM project_groups pg 
-                      WHERE pg.mentor_id = ? AND pg.level > 1`;
-    let groupParams = [mentorId];
+                      LEFT JOIN project_group_mentors pgm ON pg.id = pgm.group_id
+                      WHERE (pg.mentor_id = ? OR pgm.mentor_id = ?)`;
+    let groupParams = [mentorId, mentorId];
 
-    if (level && !isNaN(Number(level)) && Number(level) > 1) {
+    if (level && !isNaN(Number(level)) && Number(level) >= 1) {
       groupQuery += ' AND pg.level = ?';
       groupParams.push(Number(level));
     }
@@ -971,3 +963,4 @@ exports.getMentorProjectDelays = async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 };
+

@@ -207,13 +207,38 @@ const getGroupsByLevel = async (req, res) => {
 
 
 
-    //Fetch detailed user info for all students in those groups
+    // Fetch detailed user info for all students in those groups
     const [members] = await dbPromise.query(
       `SELECT gm.group_id, u.id, u.name, u.university_id, gm.is_leader
        FROM project_group_members gm
        LEFT JOIN users u ON u.id = gm.student_id
        WHERE gm.group_id IN (?)
        ORDER BY gm.is_leader DESC, u.name ASC`,
+      [groupIds]
+    );
+
+    // Fetch all mentors from project_group_mentors junction table
+    let assignedMentors = [];
+    try {
+      const [mRows] = await dbPromise.query(
+        `SELECT pgm.group_id, u.id, u.name, u.email, u.phone
+         FROM project_group_mentors pgm
+         JOIN users u ON u.id = pgm.mentor_id
+         WHERE pgm.group_id IN (?)
+         ORDER BY u.name ASC`,
+        [groupIds]
+      );
+      assignedMentors = mRows || [];
+    } catch (mErr) {
+      console.warn('project_group_mentors query fallback in groupController:', mErr.message);
+    }
+
+    // Fallback: fetch legacy mentors
+    const [legacyMentors] = await dbPromise.query(
+      `SELECT pg.id AS group_id, u.id, u.name, u.email, u.phone
+       FROM project_groups pg
+       JOIN users u ON u.id = pg.mentor_id
+       WHERE pg.id IN (?) AND pg.mentor_id IS NOT NULL`,
       [groupIds]
     );
 
@@ -232,6 +257,20 @@ const getGroupsByLevel = async (req, res) => {
         (m) => Number(m.is_leader) === 1
       );
 
+      // Merge mentors from junction table + legacy column
+      const junctionGroupMentors = assignedMentors.filter((m) => m.group_id === group.groupId);
+      const legacyGroupMentors = legacyMentors.filter((m) => m.group_id === group.groupId);
+      
+      const allMentorsMap = new Map();
+      junctionGroupMentors.forEach(m => allMentorsMap.set(m.id, m));
+      legacyGroupMentors.forEach(m => {
+        if (!allMentorsMap.has(m.id)) allMentorsMap.set(m.id, m);
+      });
+      const groupMentorsList = Array.from(allMentorsMap.values());
+
+      const mentorDisplayNames = groupMentorsList.map(m => m.name).filter(Boolean);
+      const mentorDisplayName = mentorDisplayNames.join(', ') || 'Unassigned';
+
       return {
         groupId: group.groupId,
         groupName: group.groupName,
@@ -240,7 +279,12 @@ const getGroupsByLevel = async (req, res) => {
         supervisor: group.supervisor || 'Not Assigned',
         supervisorId2: group.supervisorId2 || null,
         supervisor2: group.supervisor2 || null,
-        mentorId: group.mentorId,
+        mentorId: groupMentorsList[0]?.id || group.mentorId || null,
+        mentor: mentorDisplayName,
+        mentorName: mentorDisplayName,
+        assignedMentor: mentorDisplayName,
+        mentors: groupMentorsList,
+        mentorNames: mentorDisplayNames,
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         members: groupMembers,
         status: 'Active'
