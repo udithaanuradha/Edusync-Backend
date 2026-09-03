@@ -6,6 +6,34 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests and
+// marksController.js's normalizeAcademicUnit for the same mapping).
+const normalizeAcademicUnit = (unit) => {
+    const clean = String(unit || '').trim().toUpperCase();
+    if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+    if (clean === 'CM' || clean === 'AI') return 'AI';
+    if (clean === 'IT') return 'IT';
+    return clean || null;
+};
+
+// Resolves the department a coordinatorId is actually authorized to see,
+// straight from their own users row — never trusts a department string the
+// client might send directly. Returns null (no restriction) if the id is
+// missing/unknown.
+const getCoordinatorDepartment = async (coordinatorId) => {
+    if (!coordinatorId) return null;
+    try {
+        const [rows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
+        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    } catch (error) {
+        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        return null;
+    }
+};
+
 // `evaluation_panels` has no concept of completion — a panel only ever
 // leaves the coordinator's calendar once its date is in the past, or it's
 // manually deleted, even after the evaluation it covers is actually done.
@@ -202,12 +230,21 @@ const updateEvaluationPanel = async (req, res) => {
  * the only consumer of this endpoint, so the cap was removed rather than
  * raised.
  */
+// Optional ?coordinatorId= scopes the response to just that coordinator's
+// own department (resolved server-side above, never a client-supplied
+// department string) — previously this returned every panel system-wide
+// regardless of who created the underlying group, so a coordinator's
+// Calendar "Upcoming Panels" list showed every other department's panels
+// too.
 const getUpcomingPanels = async (req, res) => {
     try {
         await ensureEvaluationPanelStatusColumn();
 
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+
         const query = `
-            SELECT 
+            SELECT
                 ep.*,
                 pg.department,
                 pg.supervisor_id,
@@ -216,17 +253,24 @@ const getUpcomingPanels = async (req, res) => {
                 u2.name as group_supervisor_name_2
             FROM evaluation_panels ep
             LEFT JOIN project_groups pg ON (
-                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group)) 
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))
                 AND pg.level = ep.academic_level
             )
             LEFT JOIN users u1 ON u1.id = pg.supervisor_id
             LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
             WHERE ep.panel_date >= CURRENT_DATE AND ep.status != 'completed'
+              AND (? IS NULL OR
+                   CASE
+                     WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+                     WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+                     WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+                     ELSE UPPER(TRIM(pg.department))
+                   END = ?)
             ORDER BY ep.panel_date ASC, ep.start_time ASC
         `;
 
         // Await the rows from the database and forward them to the client.
-        const [results] = await db.promise().query(query);
+        const [results] = await db.promise().query(query, [department, department]);
         res.status(200).json(results);
     } catch (error) {
         console.error('Database error (getUpcomingPanels):', error);
