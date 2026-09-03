@@ -198,12 +198,16 @@ const computeLevelMarksSummary = async (level, department = null) => {
                 pg.id AS group_id,
                 pg.group_name,
                 pg.department AS group_department,
+                pg.supervisor_id,
+                pg.supervisor_id_2,
                 pgm.is_leader,
-                sup.name AS supervisor_name
+                sup.name AS supervisor_name,
+                sup2.name AS supervisor_name_2
              FROM project_groups pg
              JOIN project_group_members pgm ON pgm.group_id = pg.id
              JOIN users u ON u.id = pgm.student_id
              LEFT JOIN users sup ON sup.id = pg.supervisor_id
+             LEFT JOIN users sup2 ON sup2.id = pg.supervisor_id_2
              WHERE pg.level = ?
                AND (? IS NULL OR
                     CASE
@@ -261,17 +265,22 @@ const computeLevelMarksSummary = async (level, department = null) => {
         // elsewhere and may not exist yet on a fresh environment, in which
         // case no group's final marks are considered released.
         let finalReleasedGroups = new Set();
+        let allLevelPanels = [];
         try {
-            const [finalPanels] = await db.promise().query(
-                `SELECT DISTINCT target_group FROM evaluation_panels
-                 WHERE academic_level = ? AND status = 'completed' AND LOWER(TRIM(evaluation_type)) = 'final'`,
+            const [allPanelsRows] = await db.promise().query(
+                `SELECT id, target_group, evaluation_type, academic_level, status, evaluators, supervisors
+                 FROM evaluation_panels
+                 WHERE academic_level = ?`,
                 [level]
             );
+            allLevelPanels = allPanelsRows;
             finalReleasedGroups = new Set(
-                finalPanels.map((p) => String(p.target_group || '').trim().toLowerCase())
+                allPanelsRows
+                    .filter(p => String(p.status || '').toLowerCase() === 'completed' && String(p.evaluation_type || '').toLowerCase().trim() === 'final')
+                    .map((p) => String(p.target_group || '').trim().toLowerCase())
             );
         } catch (error) {
-            console.warn('evaluation_panels final-release check failed (treating as not released):', error.message);
+            console.warn('evaluation_panels fetch in marksController failed:', error.message);
         }
 
         // Build structured summary per student
@@ -347,7 +356,10 @@ const computeLevelMarksSummary = async (level, department = null) => {
                 group_id: student.group_id,
                 group_name: student.group_name,
                 group_department: student.group_department || '',
+                supervisor_id: student.supervisor_id,
+                supervisor_id_2: student.supervisor_id_2,
                 supervisor_name: student.supervisor_name || 'Assigned Supervisor',
+                supervisor_name_2: student.supervisor_name_2 || '',
                 is_leader: Boolean(student.is_leader),
                 stages: stageBreakdown,
                 sum_obtained_marks: Number(sumObtainedMarks.toFixed(2)),
@@ -365,6 +377,7 @@ const computeLevelMarksSummary = async (level, department = null) => {
 
         return {
             stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })),
+            panels: allLevelPanels,
             data: summary
         };
 };
@@ -387,9 +400,9 @@ const getLevelMarksSummary = async (req, res) => {
         const studentId = req.query.studentId ? Number(req.query.studentId) : null;
         const coordinatorId = req.query.coordinatorId || null;
         const department = await getCoordinatorDepartment(coordinatorId);
-        const { stages, data } = await computeLevelMarksSummary(level, department);
+        const { stages, panels, data } = await computeLevelMarksSummary(level, department);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
-        return res.json({ success: true, level, stages, data: scopedData });
+        return res.json({ success: true, level, stages, panels: panels || [], data: scopedData });
     } catch (error) {
         console.error('Error fetching level marks summary:', error);
         return res.status(500).json({ success: false, message: 'Failed to fetch marks summary', error: error.message });
