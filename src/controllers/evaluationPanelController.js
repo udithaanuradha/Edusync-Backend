@@ -18,8 +18,13 @@ const getPanelsByEvaluator = async (req, res) => {
         let query = `SELECT * FROM evaluation_panels WHERE 1=1`;
         const queryParams = [];
 
-        query += ` AND (LOWER(evaluators) LIKE LOWER(?))`;
-        queryParams.push(`%${supervisorName}%`);
+        // `evaluators` now holds only the external evaluators the coordinator
+        // hand-picked; the group's own supervisor(s) live in `supervisors`
+        // instead (see calendarController.js's scheduleEvaluationPanel /
+        // updateEvaluationPanel). Check both columns so a supervisor still
+        // shows up as "assigned" to their own group's panel.
+        query += ` AND (LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?))`;
+        queryParams.push(`%${supervisorName}%`, `%${supervisorName}%`);
 
         if (date) {
             query += ` AND panel_date = ?`;
@@ -61,9 +66,11 @@ const checkEvaluatorStatus = async (req, res) => {
             return res.status(200).json({ isEvaluator: false, assignedPanelsCount: 0 });
         }
 
+        // See getPanelsByEvaluator above: `evaluators` is external evaluators
+        // only now, so a group's own supervisor is found via `supervisors`.
         const [results] = await db.promise().query(
-            `SELECT COUNT(*) as count FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?)`,
-            [`%${supervisorName}%`]
+            `SELECT COUNT(*) as count FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?)`,
+            [`%${supervisorName}%`, `%${supervisorName}%`]
         );
 
         const count = results[0]?.count || 0;
@@ -161,9 +168,11 @@ const getMyAssignedGroups = async (req, res) => {
             }
         }
 
-        // Find assigned evaluation panels
-        let panelQuery = `SELECT * FROM evaluation_panels WHERE (LOWER(evaluators) LIKE LOWER(?))`;
-        const panelParams = [`%${supervisorName}%`];
+        // Find assigned evaluation panels. `evaluators` is external
+        // evaluators only; a group's own supervisor is found via
+        // `supervisors` instead (see getPanelsByEvaluator above).
+        let panelQuery = `SELECT * FROM evaluation_panels WHERE (LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?))`;
+        const panelParams = [`%${supervisorName}%`, `%${supervisorName}%`];
 
         if (level) {
             panelQuery += ` AND academic_level = ?`;
@@ -342,7 +351,10 @@ const getMyAssignedGroups = async (req, res) => {
                 start_time: panel.start_time,
                 duration: panel.duration,
                 location: panel.location,
+                meeting_link: panel.meeting_link || panel.meetingLink || "",
                 evaluators: panel.evaluators,
+                supervisors: panel.supervisors,
+                supervisor_name: (typeof panel.supervisors === "string" && panel.supervisors.startsWith("[") ? (JSON.parse(panel.supervisors || "[]") || []).join(", ") : (panel.supervisors || "")),
                 leader_name: leaderName,
                 evaluator_id: evaluatorUserId,
                 total_marks: groupTotalMarks || 60,

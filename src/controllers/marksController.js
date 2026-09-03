@@ -108,14 +108,54 @@ const submitMarks = async (req, res) => {
     }
 };
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests for the same mapping,
+// and CalendarPage.tsx's getSupervisorDepartment on the frontend). Every
+// department-scoping check in this file goes through this so a coordinator
+// account stored as 'CM' correctly matches groups/students stored as 'AI'.
+const normalizeAcademicUnit = (unit) => {
+    const clean = String(unit || '').trim().toUpperCase();
+    if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+    if (clean === 'CM' || clean === 'AI') return 'AI';
+    if (clean === 'IT') return 'IT';
+    return clean || null;
+};
+
+// Resolves the department a coordinatorId is actually authorized to see,
+// straight from their own users row — never trusts a department string the
+// client might send directly. Returns null if the id is missing/unknown,
+// which callers treat as "no department restriction" (e.g. an admin viewing
+// every department, or a request with no coordinatorId at all).
+const getCoordinatorDepartment = async (coordinatorId) => {
+    if (!coordinatorId) return null;
+    try {
+        const [rows] = await db.promise().query(
+            'SELECT academic_unit FROM users WHERE id = ?',
+            [coordinatorId],
+        );
+        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    } catch (error) {
+        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        return null;
+    }
+};
+
 /**
  * Marks Aggregation: Evaluators -> Stage Marks (Average) -> Final Mark {(Total Obtained / Total Max) * 100}%
  * Shared by getLevelMarksSummary (JSON, used by the Reports/Gradebook UI) and
  * downloadMarksDistributionPdf (PDF report) so both stay consistent — pulled
  * out as a plain data function (no req/res) rather than duplicating the
  * aggregation logic in the PDF handler.
+ *
+ * `department` (already server-resolved and normalized via
+ * getCoordinatorDepartment — never a raw client-supplied string) scopes the
+ * student/group list to just that department when provided. Left null for
+ * callers that intentionally see every department (an admin, or a student
+ * reading their own single row via ?studentId=).
  */
-const computeLevelMarksSummary = async (level) => {
+const computeLevelMarksSummary = async (level, department = null) => {
         // Fetch all project stages for this level
         const [rawStages] = await db.promise().query(
             `SELECT stage_id, stage_name, description, deadline FROM project_stages WHERE level = ? ORDER BY stage_id ASC`,
@@ -165,8 +205,15 @@ const computeLevelMarksSummary = async (level) => {
              JOIN users u ON u.id = pgm.student_id
              LEFT JOIN users sup ON sup.id = pg.supervisor_id
              WHERE pg.level = ?
+               AND (? IS NULL OR
+                    CASE
+                      WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+                      WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+                      WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+                      ELSE UPPER(TRIM(pg.department))
+                    END = ?)
              ORDER BY pg.group_name ASC, pgm.is_leader DESC, u.name ASC`,
-            [level]
+            [level, department, department]
         );
 
         if (students.length === 0) {
@@ -327,12 +374,20 @@ const computeLevelMarksSummary = async (level) => {
  * computeLevelMarksSummary, used by the Reports/Gradebook UI, and by the
  * student Marks tab (via the optional ?studentId= query param) to scope the
  * response down to just that student's own row.
+ *
+ * Optional ?coordinatorId= scopes the response to just that coordinator's
+ * own department — resolved server-side from their users row, never taken
+ * from a client-supplied department string. Omitted entirely by callers that
+ * intentionally see every department (admin's AdminLevelPage; a student's
+ * own ?studentId= lookup narrows to one row anyway).
  */
 const getLevelMarksSummary = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const studentId = req.query.studentId ? Number(req.query.studentId) : null;
-        const { stages, data } = await computeLevelMarksSummary(level);
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+        const { stages, data } = await computeLevelMarksSummary(level, department);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
         return res.json({ success: true, level, stages, data: scopedData });
     } catch (error) {
@@ -356,7 +411,9 @@ const getLevelMarksSummary = async (req, res) => {
 const downloadMarksDistributionPdf = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
-        const { data: students } = await computeLevelMarksSummary(level);
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+        const { data: students } = await computeLevelMarksSummary(level, department);
 
         const marks = students
             .map((s) => Number(s.final_mark))
@@ -408,8 +465,6 @@ const downloadMarksDistributionPdf = async (req, res) => {
         [
             `Total Students: ${n}`,
             `Mean: ${mean.toFixed(2)}%`,
-            `Median: ${median.toFixed(2)}%`,
-            `Standard Deviation: ${stdDev.toFixed(2)}`,
             `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
         ].forEach((line) => doc.text(line));
         doc.moveDown(1.5);

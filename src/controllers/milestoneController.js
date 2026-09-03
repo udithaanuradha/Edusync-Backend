@@ -18,6 +18,21 @@ const ensureFeedbackSeenColumn = async () => {
   await ensureFeedbackSeenColumnPromise;
 };
 
+// Adds student_tasks.completed_at (nullable timestamp) if it isn't there
+// yet. Set to NOW() by updateTaskStatus whenever a task's status becomes
+// COMPLETED, and cleared back to NULL if it's ever moved off COMPLETED —
+// backs the "My Progress" tab's completed-tasks timeline with a real
+// completion date instead of just a creation-order list.
+let ensureCompletedAtColumnPromise = null;
+const ensureCompletedAtColumn = async () => {
+  if (!ensureCompletedAtColumnPromise) {
+    ensureCompletedAtColumnPromise = dbPromise.query(
+      `ALTER TABLE student_tasks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP NULL DEFAULT NULL`
+    );
+  }
+  await ensureCompletedAtColumnPromise;
+};
+
 const ensureMilestoneTables = async () => {
   if (!ensureTablesPromise) {
     ensureTablesPromise = (async () => {
@@ -69,6 +84,30 @@ const ensureMilestoneTables = async () => {
     })();
   }
   await ensureTablesPromise;
+};
+
+// Scope Division: each milestone can be broken into sections a leader (with
+// supervisor/mentor input) defines, and any group member can claim exactly
+// one section by ticking it — first to claim locks it to themselves.
+// Separate self-healing table, same pattern as ensureMilestoneTables.
+let ensureScopeTablePromise = null;
+const ensureScopeSectionsTable = async () => {
+  if (!ensureScopeTablePromise) {
+    ensureScopeTablePromise = dbPromise.query(`
+      CREATE TABLE IF NOT EXISTS milestone_scope_sections (
+          id INT PRIMARY KEY AUTO_INCREMENT,
+          milestone_id INT NOT NULL,
+          title VARCHAR(255) NOT NULL,
+          description TEXT,
+          claimed_by INT NULL,
+          claimed_at TIMESTAMP NULL DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT fk_scope_milestone FOREIGN KEY (milestone_id) REFERENCES milestones(id) ON DELETE CASCADE,
+          CONSTRAINT fk_scope_claimed_by FOREIGN KEY (claimed_by) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `);
+  }
+  await ensureScopeTablePromise;
 };
  
 
@@ -277,6 +316,50 @@ const updateMilestoneStatus = async (req, res) => {
   }
 };
 
+/**
+ * PUT: Edit an existing milestone's own details (title/description/dates) —
+ * distinct from updateMilestoneStatus, which only ever touches
+ * status/feedback. Leader-only, same access pattern as createMilestone.
+ */
+const updateMilestoneDetails = async (req, res) => {
+  try {
+    await ensureMilestoneTables();
+    const { id } = req.params;
+    const { title, description, start_date, due_date } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    if (!title) {
+      return res.status(400).json({ success: false, error: 'title is required.' });
+    }
+
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [id]);
+    if (mRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Milestone not found.' });
+    }
+
+    if (userRole === 'student') {
+      const [leaderRows] = await dbPromise.query(
+        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
+        [userId, mRows[0].group_id]
+      );
+      if (leaderRows.length === 0) {
+        return res.status(403).json({ success: false, error: 'Only the group leader can edit milestone details.' });
+      }
+    }
+
+    await dbPromise.query(
+      `UPDATE milestones SET title = ?, description = ?, start_date = ?, due_date = ? WHERE id = ?`,
+      [title, description || null, start_date || null, due_date || null, id]
+    );
+
+    res.status(200).json({ success: true, message: 'Milestone updated successfully.' });
+  } catch (error) {
+    console.error('❌ Error updating milestone details:', error);
+    res.status(500).json({ success: false, error: 'Failed to update milestone.' });
+  }
+};
+
 
 
 /**
@@ -305,6 +388,257 @@ const deleteMilestone = async (req, res) => {
   }
 };
 
+
+
+
+
+// SCOPE DIVISION CONTROLLERS
+
+/**
+ * GET: List a milestone's scope sections, with the claimant's name resolved.
+ */
+const getScopeSectionsByMilestone = async (req, res) => {
+  try {
+    await ensureScopeSectionsTable();
+    const { milestoneId } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [milestoneId]);
+    if (mRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Milestone not found.' });
+    }
+    if (userId && userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
+
+    const [rows] = await dbPromise.query(
+      `SELECT s.id, s.milestone_id, s.title, s.description, s.claimed_by, s.claimed_at,
+              u.name AS claimed_by_name
+       FROM milestone_scope_sections s
+       LEFT JOIN users u ON u.id = s.claimed_by
+       WHERE s.milestone_id = ?
+       ORDER BY s.created_at ASC`,
+      [milestoneId]
+    );
+
+    res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error('❌ Error fetching scope sections:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch scope sections.' });
+  }
+};
+
+/**
+ * POST: Define a new scope section under a milestone. Leader-only — the
+ * leader defines sections (with supervisor/mentor input gathered elsewhere,
+ * e.g. group chat); claiming one is open to any member (see claimScopeSection).
+ */
+const createScopeSection = async (req, res) => {
+  try {
+    await ensureScopeSectionsTable();
+    const { milestone_id, title, description } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    if (!milestone_id || !title) {
+      return res.status(400).json({ success: false, error: 'milestone_id and title are required.' });
+    }
+
+    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [milestone_id]);
+    if (mRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Milestone not found.' });
+    }
+
+    if (userRole === 'student') {
+      const [leaderRows] = await dbPromise.query(
+        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
+        [userId, mRows[0].group_id]
+      );
+      if (leaderRows.length === 0) {
+        return res.status(403).json({ success: false, error: 'Only the group leader can define scope sections.' });
+      }
+    }
+
+    const [result] = await dbPromise.query(
+      `INSERT INTO milestone_scope_sections (milestone_id, title, description) VALUES (?, ?, ?)`,
+      [milestone_id, title, description || null]
+    );
+
+    res.status(201).json({ success: true, message: 'Scope section created.', data: { id: result.insertId } });
+  } catch (error) {
+    console.error('❌ Error creating scope section:', error);
+    res.status(500).json({ success: false, error: 'Failed to create scope section.' });
+  }
+};
+
+/**
+ * PUT: Claim a scope section. Any group member may claim any still-open
+ * section — first to claim locks it. The UPDATE is guarded by
+ * `claimed_by IS NULL` so it's a single atomic statement: if two members
+ * tick the same section at nearly the same time, only the first UPDATE
+ * actually affects a row; the second affects zero rows and gets a 409
+ * instead of silently overwriting the first member's claim.
+ */
+const claimScopeSection = async (req, res) => {
+  try {
+    await ensureScopeSectionsTable();
+    const { id } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User not identified.' });
+    }
+
+    const [sRows] = await dbPromise.query(
+      `SELECT s.id, s.milestone_id, m.group_id
+       FROM milestone_scope_sections s
+       JOIN milestones m ON m.id = s.milestone_id
+       WHERE s.id = ?`,
+      [id]
+    );
+    if (sRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Scope section not found.' });
+    }
+
+    if (userRole === 'student') {
+      const isMember = await verifyMembership(userId, userRole, sRows[0].group_id);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+    }
+
+    // A student may only ever have ONE claimed section per milestone at a
+    // time — reject before attempting the atomic claim below.
+    const [existingClaim] = await dbPromise.query(
+      `SELECT id, title FROM milestone_scope_sections WHERE milestone_id = ? AND claimed_by = ? AND id != ?`,
+      [sRows[0].milestone_id, userId, id]
+    );
+    if (existingClaim.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `You've already claimed "${existingClaim[0].title}" in this milestone — you can only claim one section per milestone.`,
+      });
+    }
+
+    const [result] = await dbPromise.query(
+      `UPDATE milestone_scope_sections SET claimed_by = ?, claimed_at = NOW() WHERE id = ? AND claimed_by IS NULL`,
+      [userId, id]
+    );
+
+    if (result.affectedRows === 0) {
+      const [current] = await dbPromise.query(
+        `SELECT u.name AS claimed_by_name
+         FROM milestone_scope_sections s
+         LEFT JOIN users u ON u.id = s.claimed_by
+         WHERE s.id = ?`,
+        [id]
+      );
+      const claimerName = current[0]?.claimed_by_name || 'someone else';
+      return res.status(409).json({
+        success: false,
+        error: `This section was already claimed by ${claimerName}.`,
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Section claimed.' });
+  } catch (error) {
+    console.error('❌ Error claiming scope section:', error);
+    res.status(500).json({ success: false, error: 'Failed to claim scope section.' });
+  }
+};
+
+/**
+ * PUT: Edit a scope section's title/description. Leader-only, same
+ * restriction as creating one. Editing is allowed regardless of whether the
+ * section has already been claimed — only claiming/unclaiming touches
+ * claimed_by, this never does.
+ */
+const updateScopeSection = async (req, res) => {
+  try {
+    await ensureScopeSectionsTable();
+    const { id } = req.params;
+    const { title, description } = req.body;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, error: 'Title is required.' });
+    }
+
+    const [sRows] = await dbPromise.query(
+      `SELECT s.id, m.group_id
+       FROM milestone_scope_sections s
+       JOIN milestones m ON m.id = s.milestone_id
+       WHERE s.id = ?`,
+      [id]
+    );
+    if (sRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Scope section not found.' });
+    }
+
+    if (userRole === 'student') {
+      const [leaderRows] = await dbPromise.query(
+        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
+        [userId, sRows[0].group_id]
+      );
+      if (leaderRows.length === 0) {
+        return res.status(403).json({ success: false, error: 'Only the group leader can edit scope sections.' });
+      }
+    }
+
+    await dbPromise.query(
+      `UPDATE milestone_scope_sections SET title = ?, description = ? WHERE id = ?`,
+      [title.trim(), description || null, id]
+    );
+
+    res.status(200).json({ success: true, message: 'Scope section updated.' });
+  } catch (error) {
+    console.error('❌ Error updating scope section:', error);
+    res.status(500).json({ success: false, error: 'Failed to update scope section.' });
+  }
+};
+
+/**
+ * DELETE: Remove a scope section entirely. Leader-only, same restriction as
+ * creating one.
+ */
+const deleteScopeSection = async (req, res) => {
+  try {
+    await ensureScopeSectionsTable();
+    const { id } = req.params;
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    const [sRows] = await dbPromise.query(
+      `SELECT s.id, m.group_id
+       FROM milestone_scope_sections s
+       JOIN milestones m ON m.id = s.milestone_id
+       WHERE s.id = ?`,
+      [id]
+    );
+    if (sRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Scope section not found.' });
+    }
+
+    if (userRole === 'student') {
+      const [leaderRows] = await dbPromise.query(
+        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
+        [userId, sRows[0].group_id]
+      );
+      if (leaderRows.length === 0) {
+        return res.status(403).json({ success: false, error: 'Only the group leader can delete scope sections.' });
+      }
+    }
+
+    await dbPromise.query(`DELETE FROM milestone_scope_sections WHERE id = ?`, [id]);
+
+    res.status(200).json({ success: true, message: 'Scope section deleted.' });
+  } catch (error) {
+    console.error('❌ Error deleting scope section:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete scope section.' });
+  }
+};
 
 
 
@@ -339,6 +673,15 @@ const createStudentTask = async (req, res) => {
       const isMember = await verifyMembership(userId, userRole, mRows[0].group_id);
       if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
+
+    // A student may only ever create a task assigned to themselves — leader
+    // assigning work to a teammate has been retired in favor of "every
+    // student adds their own tasks". Non-student callers (coordinator/
+    // supervisor/admin tooling, if any) are left unrestricted here.
+    if (userRole === 'student' && String(assigned_to) !== String(userId)) {
+      return res.status(403).json({ success: false, error: 'Students can only create tasks for themselves.' });
+    }
+
     // Insert task assigned to a specific user ID
     const [result] = await dbPromise.query(
       `INSERT INTO student_tasks (milestone_id, assigned_to, task_name, description, due_date) VALUES (?, ?, ?, ?, ?)`,
@@ -476,6 +819,7 @@ const getTasksByStudentAndGroup = async (req, res) => {
 const getTasksByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureCompletedAtColumn();
     const { groupId } = req.params;
     const userId = req.headers['x-user-id'];
     const userRole = req.headers['x-user-role'];
@@ -489,10 +833,10 @@ const getTasksByGroup = async (req, res) => {
     }
 
     const [tasks] = await dbPromise.query(
-      `SELECT t.id AS id, t.milestone_id AS milestone_id, t.assigned_to AS assigned_to, 
-              t.task_name AS task_name, t.description AS description, t.status AS status, 
-              t.due_date AS due_date, t.created_at AS created_at,
-              u.name AS assigned_to_name, m.title AS milestone_title 
+      `SELECT t.id AS id, t.milestone_id AS milestone_id, t.assigned_to AS assigned_to,
+              t.task_name AS task_name, t.description AS description, t.status AS status,
+              t.due_date AS due_date, t.created_at AS created_at, t.completed_at AS completed_at,
+              u.name AS assigned_to_name, m.title AS milestone_title
        FROM student_tasks t
        JOIN milestones m ON t.milestone_id = m.id
        LEFT JOIN users u ON u.id = t.assigned_to
@@ -522,6 +866,7 @@ const getTasksByGroup = async (req, res) => {
 const updateTaskStatus = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureCompletedAtColumn();
     const { id } = req.params;
     const { status } = req.body;
     const userId = req.headers['x-user-id'];
@@ -536,9 +881,12 @@ const updateTaskStatus = async (req, res) => {
       return res.status(403).json({ success: false, error: 'Access denied. You can only update your own tasks.' });
     }
 
+    // completed_at tracks when a task actually became COMPLETED (for the "My
+    // Progress" tab's timeline); cleared if a task is ever moved back off
+    // COMPLETED, since it isn't "done" anymore.
     await dbPromise.query(
-      `UPDATE student_tasks SET status = ? WHERE id = ?`,
-      [status, id]
+      `UPDATE student_tasks SET status = ?, completed_at = ? WHERE id = ?`,
+      [status, status === 'COMPLETED' ? new Date() : null, id]
     );
 
     res.status(200).json({ success: true, message: 'Task status updated successfully' });
@@ -653,6 +1001,7 @@ module.exports = {
   createMilestone,
   getMilestonesByGroup,
   updateMilestoneStatus,
+  updateMilestoneDetails,
   getUnseenFeedbackCount,
   markGroupFeedbackSeen,
   deleteMilestone,
@@ -664,5 +1013,10 @@ module.exports = {
   updateTaskStatus,
   deleteTask,
   upsertOverview,
-  getOverviewByGroup
+  getOverviewByGroup,
+  getScopeSectionsByMilestone,
+  createScopeSection,
+  claimScopeSection,
+  updateScopeSection,
+  deleteScopeSection
 };

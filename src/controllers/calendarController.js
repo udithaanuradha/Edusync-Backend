@@ -6,6 +6,34 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests and
+// marksController.js's normalizeAcademicUnit for the same mapping).
+const normalizeAcademicUnit = (unit) => {
+    const clean = String(unit || '').trim().toUpperCase();
+    if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+    if (clean === 'CM' || clean === 'AI') return 'AI';
+    if (clean === 'IT') return 'IT';
+    return clean || null;
+};
+
+// Resolves the department a coordinatorId is actually authorized to see,
+// straight from their own users row — never trusts a department string the
+// client might send directly. Returns null (no restriction) if the id is
+// missing/unknown.
+const getCoordinatorDepartment = async (coordinatorId) => {
+    if (!coordinatorId) return null;
+    try {
+        const [rows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
+        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    } catch (error) {
+        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        return null;
+    }
+};
+
 // `evaluation_panels` has no concept of completion — a panel only ever
 // leaves the coordinator's calendar once its date is in the past, or it's
 // manually deleted, even after the evaluation it covers is actually done.
@@ -62,32 +90,66 @@ const ensureEvaluationPanelMeetingColumns = async () => {
     await ensureEvaluationPanelMeetingColumnsPromise;
 };
 
+// `evaluators` has always held the FULL panel roster (group supervisor(s)
+// plus any additional evaluators the coordinator picks) — every existing
+// "am I on this panel?" lookup (getPanelsByEvaluator, checkEvaluatorStatus,
+// getMyAssignedGroups) matches against it with a plain LIKE, and every
+// existing display (SupervisorEvaluationPanel's "Panel Evaluators" pill,
+// CoordinatorReportInner, StudentMarks) reads it as the complete list.
+// `supervisors` is purely additive metadata: the subset of `evaluators` that
+// are the group's actual assigned supervisor(s), auto-detected by
+// CalendarPage.tsx from the selected group rather than hand-picked, so the
+// UI can badge them separately without touching any of that existing
+// matching/display logic. Self-heals the same way
+// ensureEvaluationPanelMeetingColumns does.
+let ensureEvaluationPanelSupervisorsColumnPromise = null;
+const ensureEvaluationPanelSupervisorsColumn = async () => {
+    if (!ensureEvaluationPanelSupervisorsColumnPromise) {
+        ensureEvaluationPanelSupervisorsColumnPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM evaluation_panels');
+                const hasColumn = (columns || []).some((column) => column.Field === 'supervisors');
+                if (!hasColumn) {
+                    await dbPromise.query(`ALTER TABLE evaluation_panels ADD COLUMN supervisors TEXT NULL`);
+                }
+            } catch (error) {
+                console.warn('evaluation_panels supervisors column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureEvaluationPanelSupervisorsColumnPromise;
+};
+
 /**
  * Schedule an evaluation panel
- * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
- * Stores evaluators as JSON text in the `evaluation_panels` table.
+ * Expects body: { evaluationType, academicLevel, targetGroup, evaluators, supervisors?, panelDate, startTime, duration, location, meetingLink?, notes?, kind? }
+ * `evaluators` is the full panel roster (supervisors + external evaluators);
+ * `supervisors` is the subset of that roster auto-detected as the group's
+ * assigned supervisor(s). Both are stored as JSON text in `evaluation_panels`.
  */
 const scheduleEvaluationPanel = async (req, res) => {
     const {
-        evaluationType, academicLevel, targetGroup, evaluators, panelDate, startTime, duration, location,
+        evaluationType, academicLevel, targetGroup, evaluators, supervisors, panelDate, startTime, duration, location,
         meetingLink, notes, kind,
     } = req.body;
 
     try {
         await ensureEvaluationPanelMeetingColumns();
+        await ensureEvaluationPanelSupervisorsColumn();
 
-        // Convert evaluators array/object into a JSON string for storage.
+        // Convert evaluators/supervisors arrays into JSON strings for storage.
         const evaluatorsString = JSON.stringify(evaluators);
+        const supervisorsString = JSON.stringify(supervisors || []);
 
         const query = `
             INSERT INTO evaluation_panels
-            (evaluation_type, academic_level, target_group, evaluators, panel_date, start_time, duration, location, meeting_link, notes, kind)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (evaluation_type, academic_level, target_group, evaluators, supervisors, panel_date, start_time, duration, location, meeting_link, notes, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
         // Use the promise wrapper on the pool to await the query result.
         await db.promise().query(query, [
-            evaluationType, academicLevel, targetGroup, evaluatorsString, panelDate, startTime, duration, location,
+            evaluationType, academicLevel, targetGroup, evaluatorsString, supervisorsString, panelDate, startTime, duration, location,
             meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
         ]);
 
@@ -97,6 +159,60 @@ const scheduleEvaluationPanel = async (req, res) => {
         // Log the error for server-side debugging and return a 500 to the client.
         console.error('Database error (scheduleEvaluationPanel):', error);
         res.status(500).json({ error: 'Failed to schedule panel' });
+    }
+};
+
+/**
+ * Update an existing evaluation panel in place — the drawer's "Update Panel"
+ * action (openEditPanelDrawer/handleScheduleSubmit in CalendarPage.tsx).
+ * There was previously no route for this at all: editing always POSTed to
+ * scheduleEvaluationPanel, which only ever INSERTs, so "editing" a panel
+ * silently left the original row untouched in the database and inserted a
+ * second, near-duplicate one — the edited panel and the stale original both
+ * showed up in "Upcoming Panels" once the list was reloaded from the server.
+ * This is the real fix: PUT /api/calendar/panels/:id updates the row in place.
+ * Expects the same body shape as scheduleEvaluationPanel.
+ */
+const updateEvaluationPanel = async (req, res) => {
+    const panelId = Number(req.params.id);
+
+    if (!panelId || Number.isNaN(panelId)) {
+        return res.status(400).json({ error: 'A valid panel id is required.' });
+    }
+
+    const {
+        evaluationType, academicLevel, targetGroup, evaluators, supervisors, panelDate, startTime, duration, location,
+        meetingLink, notes, kind,
+    } = req.body;
+
+    try {
+        await ensureEvaluationPanelMeetingColumns();
+        await ensureEvaluationPanelSupervisorsColumn();
+
+        const evaluatorsString = JSON.stringify(evaluators);
+        const supervisorsString = JSON.stringify(supervisors || []);
+
+        const query = `
+            UPDATE evaluation_panels
+            SET evaluation_type = ?, academic_level = ?, target_group = ?, evaluators = ?, supervisors = ?,
+                panel_date = ?, start_time = ?, duration = ?, location = ?, meeting_link = ?, notes = ?, kind = ?
+            WHERE id = ?
+        `;
+
+        const [result] = await db.promise().query(query, [
+            evaluationType, academicLevel, targetGroup, evaluatorsString, supervisorsString, panelDate, startTime, duration, location,
+            meetingLink || null, notes || null, kind || 'Coordinator scheduled panel',
+            panelId,
+        ]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Panel not found.' });
+        }
+
+        res.status(200).json({ message: 'Evaluation panel updated successfully!' });
+    } catch (error) {
+        console.error('Database error (updateEvaluationPanel):', error);
+        res.status(500).json({ error: 'Failed to update panel' });
     }
 };
 
@@ -114,16 +230,47 @@ const scheduleEvaluationPanel = async (req, res) => {
  * the only consumer of this endpoint, so the cap was removed rather than
  * raised.
  */
+// Optional ?coordinatorId= scopes the response to just that coordinator's
+// own department (resolved server-side above, never a client-supplied
+// department string) — previously this returned every panel system-wide
+// regardless of who created the underlying group, so a coordinator's
+// Calendar "Upcoming Panels" list showed every other department's panels
+// too.
 const getUpcomingPanels = async (req, res) => {
     try {
         await ensureEvaluationPanelStatusColumn();
 
-        const query = `SELECT * FROM evaluation_panels
-                        WHERE panel_date >= CURRENT_DATE AND status != 'completed'
-                        ORDER BY panel_date ASC, start_time ASC`;
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+
+        const query = `
+            SELECT
+                ep.*,
+                pg.department,
+                pg.supervisor_id,
+                pg.supervisor_id_2,
+                u1.name as group_supervisor_name,
+                u2.name as group_supervisor_name_2
+            FROM evaluation_panels ep
+            LEFT JOIN project_groups pg ON (
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))
+                AND pg.level = ep.academic_level
+            )
+            LEFT JOIN users u1 ON u1.id = pg.supervisor_id
+            LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
+            WHERE ep.panel_date >= CURRENT_DATE AND ep.status != 'completed'
+              AND (? IS NULL OR
+                   CASE
+                     WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+                     WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+                     WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+                     ELSE UPPER(TRIM(pg.department))
+                   END = ?)
+            ORDER BY ep.panel_date ASC, ep.start_time ASC
+        `;
 
         // Await the rows from the database and forward them to the client.
-        const [results] = await db.promise().query(query);
+        const [results] = await db.promise().query(query, [department, department]);
         res.status(200).json(results);
     } catch (error) {
         console.error('Database error (getUpcomingPanels):', error);
@@ -131,20 +278,6 @@ const getUpcomingPanels = async (req, res) => {
     }
 };
 
-/**
- * Coordinator-driven completion, called from the Reports/Gradebook marksheet
- * (SupervisorReportPanel.tsx). Proposal/Interim/Code Review/Final each
- * happen at genuinely different points in the year for a given group, so
- * completion is scoped per (group, stage) — NOT deferred until Final —
- * otherwise an already-finished Proposal panel from months ago would keep
- * sitting on the calendar as "upcoming" until Final finally happens.
- *
- * `stageName` is optional for backward compatibility: if provided, only that
- * group's panel for that specific stage is completed (the normal case, one
- * "Complete" click per stage cell); if omitted, every still-scheduled panel
- * for the given group(s) is completed regardless of stage.
- * Expects body: { level, groupNames: string[], stageName?: string }
- */
 const completePanelsForGroups = async (req, res) => {
     const { level, groupNames, stageName } = req.body;
     const academicLevel = Number(level);
@@ -221,7 +354,7 @@ const freezeDate = async (req, res) => {
  */
 const getFrozenDates = async (req, res) => {
     try {
-        const query = 'SELECT * FROM frozen_dates ORDER BY frozen_date ASC';
+        const query = 'SELECT id, DATE_FORMAT(frozen_date, "%Y-%m-%d") as frozen_date, reason, type, created_by, created_at FROM frozen_dates ORDER BY frozen_date ASC';
         const [results] = await db.promise().query(query);
 
         res.status(200).json(results);
@@ -231,8 +364,25 @@ const getFrozenDates = async (req, res) => {
     }
 };
 
+
+/**
+ * Remove a frozen date by id or date string
+ */
+const unfreezeDate = async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.promise().query('DELETE FROM frozen_dates WHERE id = ? OR frozen_date = ?', [id, id]);
+        res.status(200).json({ message: 'Frozen date removed successfully.' });
+    } catch (error) {
+        console.error('Database error (unfreezeDate):', error);
+        res.status(500).json({ error: 'Failed to unfreeze date' });
+    }
+};
+
 module.exports = {
+    unfreezeDate,
     scheduleEvaluationPanel,
+    updateEvaluationPanel,
     getUpcomingPanels,
     completePanelsForGroups,
     deleteEvaluationPanel,

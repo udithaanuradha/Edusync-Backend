@@ -2,11 +2,13 @@ const express = require('express');
 const router = express.Router();
 const {
     scheduleEvaluationPanel,
+    updateEvaluationPanel,
     getUpcomingPanels,
     completePanelsForGroups,
     deleteEvaluationPanel,
     freezeDate,
     getFrozenDates,
+    unfreezeDate,
 } = require('../controllers/calendarController');
 
 // ---------------------------------------------------------
@@ -32,6 +34,14 @@ router.delete('/panels/:id', deleteEvaluationPanel);
 router.put('/panels/complete-for-groups', completePanelsForGroups);
 
 // ---------------------------------------------------------
+// 2.3 UPDATE A PANEL (From the drawer's "Update Panel" action). Registered
+//     AFTER '/panels/complete-for-groups' — Express matches routes in
+//     registration order, and ':id' would otherwise swallow that literal
+//     path first (matching it as id="complete-for-groups").
+// ---------------------------------------------------------
+router.put('/panels/:id', updateEvaluationPanel);
+
+// ---------------------------------------------------------
 // 3. FREEZE A DATE (From the top right button)
 // ---------------------------------------------------------
 router.post('/freeze', freezeDate);
@@ -40,5 +50,6 @@ router.post('/freeze', freezeDate);
 // 4. FETCH FROZEN DATES (To put colored dots on the calendar)
 // ---------------------------------------------------------
 router.get('/frozen-dates', getFrozenDates);
+router.delete('/frozen-dates/:id', unfreezeDate);
 
 module.exports = router;
