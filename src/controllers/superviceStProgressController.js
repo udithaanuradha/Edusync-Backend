@@ -22,7 +22,8 @@ const getGroupsProgress = async (req, res) => {
     const [groups] = await dbPromise.query(
       `SELECT pg.id AS groupId, pg.group_name AS groupName, pg.level
        FROM project_groups pg
-       WHERE pg.level = ? AND (pg.supervisor_id = ? OR pg.supervisor_id_2 = ?)`,
+       WHERE pg.level = ? AND (pg.supervisor_id = ? OR pg.supervisor_id_2 = ?)
+       ORDER BY pg.id ASC`,
       [level, supervisorId, supervisorId]
     );
 
