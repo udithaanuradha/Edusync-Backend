@@ -10,8 +10,8 @@ const getSupervisorGroups = async (req, res) => {
       `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisorName, pg.level, pg.supervisor_id AS supervisorId
        FROM project_groups pg
        LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.level = ? AND pg.supervisor_id = ?`,
-      [level, supervisorId]
+       WHERE pg.level = ? AND (pg.supervisor_id = ? OR pg.supervisor_id_2 = ?)`,
+      [level, supervisorId, supervisorId]
     );
 
     if (!groups.length) {
@@ -68,8 +68,8 @@ const getAllSupervisorGroups = async (req, res) => {
       `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisorName, pg.level, pg.supervisor_id AS supervisorId
        FROM project_groups pg
        LEFT JOIN users u ON u.id = pg.supervisor_id
-       WHERE pg.supervisor_id = ?`,
-      [supervisorId]
+       WHERE pg.supervisor_id = ? OR pg.supervisor_id_2 = ?`,
+      [supervisorId, supervisorId]
     );
 
     if (!groups.length) {
