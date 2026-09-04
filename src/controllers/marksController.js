@@ -108,14 +108,54 @@ const submitMarks = async (req, res) => {
     }
 };
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests for the same mapping,
+// and CalendarPage.tsx's getSupervisorDepartment on the frontend). Every
+// department-scoping check in this file goes through this so a coordinator
+// account stored as 'CM' correctly matches groups/students stored as 'AI'.
+const normalizeAcademicUnit = (unit) => {
+    const clean = String(unit || '').trim().toUpperCase();
+    if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+    if (clean === 'CM' || clean === 'AI') return 'AI';
+    if (clean === 'IT') return 'IT';
+    return clean || null;
+};
+
+// Resolves the department a coordinatorId is actually authorized to see,
+// straight from their own users row — never trusts a department string the
+// client might send directly. Returns null if the id is missing/unknown,
+// which callers treat as "no department restriction" (e.g. an admin viewing
+// every department, or a request with no coordinatorId at all).
+const getCoordinatorDepartment = async (coordinatorId) => {
+    if (!coordinatorId) return null;
+    try {
+        const [rows] = await db.promise().query(
+            'SELECT academic_unit FROM users WHERE id = ?',
+            [coordinatorId],
+        );
+        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    } catch (error) {
+        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        return null;
+    }
+};
+
 /**
  * Marks Aggregation: Evaluators -> Stage Marks (Average) -> Final Mark {(Total Obtained / Total Max) * 100}%
  * Shared by getLevelMarksSummary (JSON, used by the Reports/Gradebook UI) and
  * downloadMarksDistributionPdf (PDF report) so both stay consistent — pulled
  * out as a plain data function (no req/res) rather than duplicating the
  * aggregation logic in the PDF handler.
+ *
+ * `department` (already server-resolved and normalized via
+ * getCoordinatorDepartment — never a raw client-supplied string) scopes the
+ * student/group list to just that department when provided. Left null for
+ * callers that intentionally see every department (an admin, or a student
+ * reading their own single row via ?studentId=).
  */
-const computeLevelMarksSummary = async (level) => {
+const computeLevelMarksSummary = async (level, department = null) => {
         // Fetch all project stages for this level
         const [rawStages] = await db.promise().query(
             `SELECT stage_id, stage_name, description, deadline FROM project_stages WHERE level = ? ORDER BY stage_id ASC`,
@@ -158,15 +198,26 @@ const computeLevelMarksSummary = async (level) => {
                 pg.id AS group_id,
                 pg.group_name,
                 pg.department AS group_department,
+                pg.supervisor_id,
+                pg.supervisor_id_2,
                 pgm.is_leader,
-                sup.name AS supervisor_name
+                sup.name AS supervisor_name,
+                sup2.name AS supervisor_name_2
              FROM project_groups pg
              JOIN project_group_members pgm ON pgm.group_id = pg.id
              JOIN users u ON u.id = pgm.student_id
              LEFT JOIN users sup ON sup.id = pg.supervisor_id
+             LEFT JOIN users sup2 ON sup2.id = pg.supervisor_id_2
              WHERE pg.level = ?
+               AND (? IS NULL OR
+                    CASE
+                      WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+                      WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+                      WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+                      ELSE UPPER(TRIM(pg.department))
+                    END = ?)
              ORDER BY pg.group_name ASC, pgm.is_leader DESC, u.name ASC`,
-            [level]
+            [level, department, department]
         );
 
         if (students.length === 0) {
@@ -214,17 +265,22 @@ const computeLevelMarksSummary = async (level) => {
         // elsewhere and may not exist yet on a fresh environment, in which
         // case no group's final marks are considered released.
         let finalReleasedGroups = new Set();
+        let allLevelPanels = [];
         try {
-            const [finalPanels] = await db.promise().query(
-                `SELECT DISTINCT target_group FROM evaluation_panels
-                 WHERE academic_level = ? AND status = 'completed' AND LOWER(TRIM(evaluation_type)) = 'final'`,
+            const [allPanelsRows] = await db.promise().query(
+                `SELECT id, target_group, evaluation_type, academic_level, status, evaluators, supervisors
+                 FROM evaluation_panels
+                 WHERE academic_level = ?`,
                 [level]
             );
+            allLevelPanels = allPanelsRows;
             finalReleasedGroups = new Set(
-                finalPanels.map((p) => String(p.target_group || '').trim().toLowerCase())
+                allPanelsRows
+                    .filter(p => String(p.status || '').toLowerCase() === 'completed' && String(p.evaluation_type || '').toLowerCase().trim() === 'final')
+                    .map((p) => String(p.target_group || '').trim().toLowerCase())
             );
         } catch (error) {
-            console.warn('evaluation_panels final-release check failed (treating as not released):', error.message);
+            console.warn('evaluation_panels fetch in marksController failed:', error.message);
         }
 
         // Build structured summary per student
@@ -300,7 +356,10 @@ const computeLevelMarksSummary = async (level) => {
                 group_id: student.group_id,
                 group_name: student.group_name,
                 group_department: student.group_department || '',
+                supervisor_id: student.supervisor_id,
+                supervisor_id_2: student.supervisor_id_2,
                 supervisor_name: student.supervisor_name || 'Assigned Supervisor',
+                supervisor_name_2: student.supervisor_name_2 || '',
                 is_leader: Boolean(student.is_leader),
                 stages: stageBreakdown,
                 sum_obtained_marks: Number(sumObtainedMarks.toFixed(2)),
@@ -318,6 +377,7 @@ const computeLevelMarksSummary = async (level) => {
 
         return {
             stages: canonicalStages.map(s => ({ stage_id: s.canonical_id, stage_name: s.stage_name })),
+            panels: allLevelPanels,
             data: summary
         };
 };
@@ -327,14 +387,22 @@ const computeLevelMarksSummary = async (level) => {
  * computeLevelMarksSummary, used by the Reports/Gradebook UI, and by the
  * student Marks tab (via the optional ?studentId= query param) to scope the
  * response down to just that student's own row.
+ *
+ * Optional ?coordinatorId= scopes the response to just that coordinator's
+ * own department — resolved server-side from their users row, never taken
+ * from a client-supplied department string. Omitted entirely by callers that
+ * intentionally see every department (admin's AdminLevelPage; a student's
+ * own ?studentId= lookup narrows to one row anyway).
  */
 const getLevelMarksSummary = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const studentId = req.query.studentId ? Number(req.query.studentId) : null;
-        const { stages, data } = await computeLevelMarksSummary(level);
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+        const { stages, panels, data } = await computeLevelMarksSummary(level, department);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
-        return res.json({ success: true, level, stages, data: scopedData });
+        return res.json({ success: true, level, stages, panels: panels || [], data: scopedData });
     } catch (error) {
         console.error('Error fetching level marks summary:', error);
         return res.status(500).json({ success: false, message: 'Failed to fetch marks summary', error: error.message });
@@ -356,7 +424,9 @@ const getLevelMarksSummary = async (req, res) => {
 const downloadMarksDistributionPdf = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
-        const { data: students } = await computeLevelMarksSummary(level);
+        const coordinatorId = req.query.coordinatorId || null;
+        const department = await getCoordinatorDepartment(coordinatorId);
+        const { data: students } = await computeLevelMarksSummary(level, department);
 
         const marks = students
             .map((s) => Number(s.final_mark))

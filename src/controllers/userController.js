@@ -2,30 +2,71 @@ const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const dbPromise = db.promise();
 
-// Search Student for Group
-const searchStudentForGroup = (req, res) => {
-  const { uniId, level } = req.query;
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests, marksController.js's
+// and calendarController.js's normalizeAcademicUnit for the same mapping).
+const normalizeAcademicUnit = (unit) => {
+  const clean = String(unit || '').trim().toUpperCase();
+  if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+  if (clean === 'CM' || clean === 'AI') return 'AI';
+  if (clean === 'IT') return 'IT';
+  return clean || null;
+};
+
+// Resolves the department a coordinatorId is actually authorized to see,
+// straight from their own users row — never trusts a department string the
+// client might send directly. Returns null (no restriction) if the id is
+// missing/unknown.
+const getCoordinatorDepartment = async (coordinatorId) => {
+  if (!coordinatorId) return null;
+  try {
+    const [rows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
+    return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+  } catch (error) {
+    console.warn('getCoordinatorDepartment lookup failed:', error.message);
+    return null;
+  }
+};
+
+// Search Student for Group — a coordinator adding a member by exact
+// university ID. Optional ?coordinatorId= scopes the lookup to that
+// coordinator's own department (resolved server-side above), so a
+// coordinator can no longer pull in and add a student from a different
+// department just by knowing their id.
+const searchStudentForGroup = async (req, res) => {
+  const { uniId, level, coordinatorId } = req.query;
 
   if (!uniId || !level) {
     return res.status(400).json({ error: "Please provide both University ID and Academic Level." });
   }
 
-  const sql = `
-    SELECT id, name, university_id, email, level 
-    FROM users 
-    WHERE university_id = ? AND role = 'student' AND level = ?
-  `;
+  try {
+    const department = await getCoordinatorDepartment(coordinatorId);
 
-  db.query(sql, [uniId, level], (err, results) => {
-    if (err) {
-      console.error("Database Search Error:", err);
-      return res.status(500).json({ error: "Failed to search the database." });
-    }
+    const sql = `
+      SELECT id, name, university_id, email, level
+      FROM users
+      WHERE university_id = ? AND role = 'student' AND level = ?
+        AND (? IS NULL OR
+             CASE
+               WHEN UPPER(TRIM(academic_unit)) IN ('IDS', 'ITM') THEN 'ITM'
+               WHEN UPPER(TRIM(academic_unit)) IN ('CM', 'AI') THEN 'AI'
+               WHEN UPPER(TRIM(academic_unit)) = 'IT' THEN 'IT'
+               ELSE UPPER(TRIM(academic_unit))
+             END = ?)
+    `;
+
+    const [results] = await dbPromise.query(sql, [uniId, level, department, department]);
     if (results.length === 0) {
       return res.status(404).json({ error: "No student found with this ID for this Academic Level." });
     }
     res.status(200).json({ success: true, student: results[0] });
-  });
+  } catch (err) {
+    console.error("Database Search Error:", err);
+    return res.status(500).json({ error: "Failed to search the database." });
+  }
 };
 
 // Search Supervisors (Searching Lecturers)
@@ -186,6 +227,7 @@ const getUsersByRole = async (req, res) => {
 const getStudentsByLevel = async (req, res) => {
   const level = req.params.level;
   const studentId = req.query.studentId;
+  const coordinatorId = req.query.coordinatorId;
   if (!level) return res.status(400).json({ error: "Please provide an Academic Level." });
 
   try {
@@ -210,9 +252,26 @@ const getStudentsByLevel = async (req, res) => {
       return res.status(200).json(results);
     }
 
+    // Coordinator-facing call (GroupManagement.tsx's "add member" search) —
+    // optional ?coordinatorId= scopes the list to that coordinator's own
+    // department (resolved server-side above), so a coordinator can no
+    // longer see and add students from every other department at this
+    // level; previously this branch returned everyone unfiltered.
+    const department = await getCoordinatorDepartment(coordinatorId);
+
     const [results] = await dbPromise.query(
-      `SELECT id, name, university_id, academic_unit AS department, level FROM users WHERE role = 'student' AND level = ? ORDER BY name ASC`,
-      [level]
+      `SELECT id, name, university_id, academic_unit AS department, level
+       FROM users
+       WHERE role = 'student' AND level = ?
+         AND (? IS NULL OR
+              CASE
+                WHEN UPPER(TRIM(academic_unit)) IN ('IDS', 'ITM') THEN 'ITM'
+                WHEN UPPER(TRIM(academic_unit)) IN ('CM', 'AI') THEN 'AI'
+                WHEN UPPER(TRIM(academic_unit)) = 'IT' THEN 'IT'
+                ELSE UPPER(TRIM(academic_unit))
+              END = ?)
+       ORDER BY name ASC`,
+      [level, department, department]
     );
     res.status(200).json(results);
   } catch (err) {
