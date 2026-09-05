@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
+const { extractProjectName } = require('../utils/extractProjectName');
 
 // Percent of `completed` out of `total`, safe for total = 0.
 const pct = (completed, total) => (total > 0 ? Math.round((completed / total) * 100) : 0);
@@ -61,6 +62,23 @@ const getGroupsProgress = async (req, res) => {
 
     const milestoneToGroup = new Map(milestones.map((m) => [m.id, m.group_id]));
 
+    // Same source as groupDetailsToSupervisorDashboardController.js's
+    // projectName field: group_requests.request_message via
+    // created_group_id, kept as its own query here rather than a shared
+    // model so this controller's existing query+merge-in-JS style (per its
+    // own file comment) isn't disturbed.
+    const [projectRequests] = await dbPromise.query(
+      `SELECT created_group_id, request_message
+       FROM group_requests
+       WHERE created_group_id IN (?)`,
+      [groupIds]
+    );
+    const projectNamesByGroupId = new Map();
+    projectRequests.forEach((row) => {
+      const name = extractProjectName(row.request_message);
+      if (name) projectNamesByGroupId.set(row.created_group_id, name);
+    });
+
     const formattedData = groups.map((group) => {
       const groupMilestones = milestones.filter((m) => m.group_id === group.groupId);
       const groupTasks = tasks.filter(
@@ -83,6 +101,7 @@ const getGroupsProgress = async (req, res) => {
         progressPercent: pct(completedTasks, totalTasks),
         totalMilestones,
         approvedMilestones,
+        projectName: projectNamesByGroupId.get(group.groupId) || null,
       };
     });
 

@@ -1,5 +1,29 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
+const { extractProjectName } = require('../utils/extractProjectName');
+
+// A group's project title isn't a column on project_groups — it only exists
+// as free text inside the group_requests row that created it
+// (group_requests.created_group_id -> project_groups.id, set once at
+// creation time). Returns a Map<groupId, projectName | null> for the given
+// group ids so each caller below can merge it in alongside members.
+const loadProjectNamesByGroupId = async (groupIds) => {
+  if (!groupIds.length) return new Map();
+
+  const [requests] = await dbPromise.query(
+    `SELECT created_group_id, request_message
+     FROM group_requests
+     WHERE created_group_id IN (?)`,
+    [groupIds]
+  );
+
+  const map = new Map();
+  requests.forEach((row) => {
+    const name = extractProjectName(row.request_message);
+    if (name) map.set(row.created_group_id, name);
+  });
+  return map;
+};
 
 const getSupervisorGroups = async (req, res) => {
   const level = Number(req.params.level);
@@ -30,6 +54,8 @@ const getSupervisorGroups = async (req, res) => {
       [groupIds]
     );
 
+    const projectNamesByGroupId = await loadProjectNamesByGroupId(groupIds);
+
     const formattedData = groups.map(group => {
       const groupMembers = members
         .filter(m => m.group_id === group.groupId)
@@ -51,6 +77,7 @@ const getSupervisorGroups = async (req, res) => {
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         memberCount: groupMembers.length,
         members: groupMembers.map(m => m.name).join(', '),
+        projectName: projectNamesByGroupId.get(group.groupId) || null,
       };
     });
 
@@ -89,6 +116,8 @@ const getAllSupervisorGroups = async (req, res) => {
       [groupIds]
     );
 
+    const projectNamesByGroupId = await loadProjectNamesByGroupId(groupIds);
+
     const formattedData = groups.map(group => {
       const groupMembers = members
         .filter(m => m.group_id === group.groupId)
@@ -110,6 +139,7 @@ const getAllSupervisorGroups = async (req, res) => {
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         memberCount: groupMembers.length,
         members: groupMembers.map(m => m.name).join(', '),
+        projectName: projectNamesByGroupId.get(group.groupId) || null,
       };
     });
 

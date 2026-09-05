@@ -323,10 +323,12 @@ const getStudentGroup = async (req, res) => {
     //  Join groups with members table to find where student_id matches and optionally filter by level
     
     const [userGroups] = await dbPromise.query(
-      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor, pg.level
+      `SELECT pg.id AS groupId, pg.group_name AS groupName, u.name AS supervisor, pg.level,
+              pg.supervisor_id AS supervisorId, u2.name AS supervisor2, pg.supervisor_id_2 AS supervisorId2
        FROM project_groups pg
        JOIN project_group_members gm ON pg.id = gm.group_id
        LEFT JOIN users u ON u.id = pg.supervisor_id
+       LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
        WHERE gm.student_id = ? ${level ? 'AND pg.level = ?' : ''}`,
       level ? [studentId, level] : [studentId]
     );
@@ -369,6 +371,12 @@ const getStudentGroup = async (req, res) => {
         groupName: group.groupName,
         level: group.level,
         supervisor: group.supervisor || 'Not Assigned',
+        // Additive — id (and the optional second supervisor) for callers
+        // that need to actually reference the assigned supervisor(s), e.g.
+        // populating a dropdown restricted to this student's own group.
+        supervisorId: group.supervisorId || null,
+        supervisorId2: group.supervisorId2 || null,
+        supervisor2: group.supervisor2 || null,
         leader: leader ? leader.name : (groupMembers[0]?.name || 'Not Assigned'),
         members: groupMembers,
         status: 'Active'

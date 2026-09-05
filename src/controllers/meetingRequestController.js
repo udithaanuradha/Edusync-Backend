@@ -1,9 +1,12 @@
 const MeetingRequestModel = require('../models/meetingRequestModel');
 
 const createRequest = (req, res) => {
-  const { student_id, supervisor_id, group_name, topic, preferred_date, preferred_time, end_time, reason } = req.body;
-  
-  if (!student_id || !supervisor_id || !group_name || !topic || !preferred_date || !preferred_time || !end_time) {
+  const { student_id, supervisor_id, group_name, topic, reason } = req.body;
+
+  // preferred_date/preferred_time/end_time are optional — a student can
+  // send a request without proposing a specific slot, leaving the
+  // supervisor to set the actual date/time when they schedule it.
+  if (!student_id || !supervisor_id || !group_name || !topic) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
