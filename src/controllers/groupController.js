@@ -595,6 +595,28 @@ const createGroup = async (req, res) => {
       resolvedDepartment = leaderRows[0]?.academic_unit || null;
     }
 
+    // Reject if the group's level no longer matches every member's CURRENT
+    // academic level. createGroupRequest only validates this at submission
+    // time — if a student's level is corrected/changed any time afterward
+    // (before the coordinator gets around to creating the group), this step
+    // would otherwise silently create a real group at the wrong level with
+    // no error at all.
+    if (Array.isArray(memberIds) && memberIds.length > 0) {
+      const [memberLevelRows] = await connection.query(
+        `SELECT id, name, level FROM users WHERE id IN (?)`,
+        [memberIds]
+      );
+      const levelMismatched = memberLevelRows.filter((m) => Number(m.level) !== Number(level));
+      if (levelMismatched.length > 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          error: 'One or more members’ current academic level no longer matches this group’s level. Ask them to resubmit their group request at their current level.',
+          level_mismatched_member_ids: levelMismatched.map((m) => m.id),
+        });
+      }
+    }
+
     let insertQuery = `INSERT INTO project_groups (group_name, level, supervisor_id, supervisor_id_2, department`;
     const insertValues = [groupName, level, supervisorId || null, supervisorId2 || null, resolvedDepartment];
 
@@ -1382,6 +1404,23 @@ const approveGroupRequest = async (req, res) => {
 
     if (resolvedMembers.length === 0) {
       return res.status(400).json({ error: 'No valid student members found to form the group' });
+    }
+
+    // Reject if this request's project_level no longer matches every
+    // resolved member's (including the leader's) CURRENT academic level —
+    // see the matching check in createGroup. This only blocks actually
+    // creating the group; the request itself stays visible wherever it
+    // already was.
+    const [approveLevelRows] = await dbPromise.query(
+      `SELECT id, name, level FROM users WHERE id IN (?)`,
+      [resolvedMembers]
+    );
+    const approveLevelMismatched = approveLevelRows.filter((m) => Number(m.level) !== normalizedLevel);
+    if (approveLevelMismatched.length > 0) {
+      return res.status(400).json({
+        error: 'One or more members’ current academic level no longer matches this request’s level. Ask them to resubmit their group request at their current level.',
+        level_mismatched_member_ids: approveLevelMismatched.map((m) => m.id),
+      });
     }
 
     // Create group and members within a transaction

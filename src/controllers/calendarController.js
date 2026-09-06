@@ -42,6 +42,36 @@ const getCoordinatorScope = async (coordinatorId) => {
     }
 };
 
+// Resolves the group a student actually belongs to (their own row in
+// project_group_members joined to project_groups), so their Calendar can be
+// scoped to just their own group's panels instead of reusing
+// getCoordinatorScope — that one resolves department/level off the users
+// table, which for a student is their own personal academic_unit/level, not
+// their group's. Returns null (no group / unknown id) so callers can fall
+// back to "no restriction" the same way getCoordinatorScope does.
+const getStudentGroupScope = async (studentId) => {
+    if (!studentId) return null;
+    try {
+        const [rows] = await dbPromise.query(
+            `SELECT pg.group_name, pg.level
+             FROM project_group_members gm
+             JOIN project_groups pg ON pg.id = gm.group_id
+             WHERE gm.student_id = ?
+             ORDER BY gm.created_at DESC
+             LIMIT 1`,
+            [studentId],
+        );
+        if (rows.length === 0) return null;
+        return {
+            groupName: rows[0].group_name,
+            level: rows[0].level != null ? Number(rows[0].level) : null,
+        };
+    } catch (error) {
+        console.warn('getStudentGroupScope lookup failed:', error.message);
+        return null;
+    }
+};
+
 // `evaluation_panels` has no concept of completion — a panel only ever
 // leaves the coordinator's calendar once its date is in the past, or it's
 // manually deleted, even after the evaluation it covers is actually done.
@@ -249,9 +279,22 @@ const getUpcomingPanels = async (req, res) => {
         await ensureEvaluationPanelStatusColumn();
 
         const coordinatorId = req.query.coordinatorId || null;
-        const scope = await getCoordinatorScope(coordinatorId);
+        const studentId = req.query.studentId || null;
+
+        // studentId takes its own path, entirely separate from the
+        // coordinatorId/getCoordinatorScope one below — a student's own
+        // users row has their personal academic_unit/level, not their
+        // group's, so reusing getCoordinatorScope for a student would
+        // (and previously did, when the frontend sent coordinatorId for
+        // every logged-in user) scope by the wrong thing. When studentId
+        // is absent this resolves to null exactly like scope did before,
+        // so the coordinatorId behavior below is completely unchanged.
+        const studentGroupScope = studentId ? await getStudentGroupScope(studentId) : null;
+        const studentGroupName = studentGroupScope ? studentGroupScope.groupName : null;
+
+        const scope = studentId ? null : await getCoordinatorScope(coordinatorId);
         const department = scope ? scope.department : null;
-        const level = scope ? scope.level : null;
+        const level = studentGroupScope ? studentGroupScope.level : (scope ? scope.level : null);
 
         const query = `
             SELECT
@@ -277,11 +320,15 @@ const getUpcomingPanels = async (req, res) => {
                      WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
                      ELSE UPPER(TRIM(pg.department))
                    END = ?)
+              AND (? IS NULL OR LOWER(TRIM(ep.target_group)) = LOWER(TRIM(?)))
             ORDER BY ep.panel_date ASC, ep.start_time ASC
         `;
 
         // Await the rows from the database and forward them to the client.
-        const [results] = await db.promise().query(query, [level, level, department, department]);
+        const [results] = await db.promise().query(
+            query,
+            [level, level, department, department, studentGroupName, studentGroupName],
+        );
         res.status(200).json(results);
     } catch (error) {
         console.error('Database error (getUpcomingPanels):', error);
