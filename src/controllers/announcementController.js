@@ -135,9 +135,10 @@ const getAnnouncements = (req, res) => {
       whereConditions.push('author_name = ?');
       params.push(authorName);
     }
-    // 3. SUPER ADMIN: Sees absolutely every announcement
+    // 3. ADMIN: Sees only announcements specifically targeted to Admins or All System Users
     else if (userRole && userRole.toLowerCase() === 'admin') {
-      // admin sees all
+      whereConditions.push(`(LOWER(TRIM(target_audience)) IN ('all', 'all system users', 'admin', 'admins', 'administrator', 'administrators') OR LOWER(target_audience) LIKE ?)`);
+      params.push('%admin%');
     }
     // 4. COORDINATOR: Uses "Rule of Relevance"
     else if (userRole && userRole.toLowerCase() === 'coordinator') {

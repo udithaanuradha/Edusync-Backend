@@ -15,14 +15,21 @@ const getPanelsByEvaluator = async (req, res) => {
             });
         }
 
-        let query = `SELECT * FROM evaluation_panels WHERE 1=1`;
+        let query = `
+            SELECT ep.*, pg.department
+            FROM evaluation_panels ep
+            LEFT JOIN project_groups pg ON (
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))
+                AND pg.level = ep.academic_level
+            )
+            WHERE 1=1
+        `;
         const queryParams = [];
 
-        // `evaluators` now holds only the external evaluators the coordinator
-        // hand-picked; the group's own supervisor(s) live in `supervisors`
-        // instead (see calendarController.js's scheduleEvaluationPanel /
-        // updateEvaluationPanel). Check both columns so a supervisor still
-        // shows up as "assigned" to their own group's panel.
+        if (req.query.includeCompleted !== 'true') {
+            query += ` AND COALESCE(ep.status, '') != 'completed'`;
+        }
+
         query += ` AND LOWER(evaluators) LIKE LOWER(?)`;
         queryParams.push(`%${supervisorName}%`);
 
@@ -173,6 +180,10 @@ const getMyAssignedGroups = async (req, res) => {
         // `supervisors` instead (see getPanelsByEvaluator above).
         let panelQuery = `SELECT * FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?)`;
         const panelParams = [`%${supervisorName}%`];
+
+        if (req.query.includeCompleted !== 'true') {
+            panelQuery += ` AND COALESCE(status, '') != 'completed'`;
+        }
 
         if (level) {
             panelQuery += ` AND academic_level = ?`;
@@ -391,6 +402,7 @@ const getMyAssignedGroups = async (req, res) => {
                 group_id: groupId || panel.id,
                 group_name: panel.target_group,
                 project_title: panel.target_group,
+                department: (group?.department || '').toUpperCase() === 'IDS' ? 'ITM' : (group?.department || 'ITM'),
                 evaluation_type: panel.evaluation_type,
                 academic_level: panel.academic_level,
                 stage_id: stageId,
@@ -398,6 +410,7 @@ const getMyAssignedGroups = async (req, res) => {
                 panel_date: panel.panel_date,
                 start_time: panel.start_time,
                 duration: panel.duration,
+                status: panel.status || 'scheduled',
                 location: panel.location,
                 meeting_link: panel.meeting_link || panel.meetingLink || "",
                 evaluators: panel.evaluators,
