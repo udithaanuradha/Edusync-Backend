@@ -534,6 +534,10 @@ app.use("/api/submissions", submissionRoutes);
 const milestoneRoutes = require("./src/routes/milestoneRoutes");
 app.use("/api/milestones", milestoneRoutes);
 
+// Student's Group/Individual project-type choice (Level 3 & 4 toggle)
+const projectTypeRoutes = require("./src/routes/projectTypeRoutes");
+app.use("/api/project-type", projectTypeRoutes);
+
 // Dashboard & Marks (Combined from develop)
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 app.use("/api/dashboard", dashboardRoutes);
