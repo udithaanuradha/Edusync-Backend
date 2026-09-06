@@ -449,7 +449,7 @@ app.get("/api/admin/stats", (req, res) => {
           AND designation IS NOT NULL
       ) as totalLecturers,
       (SELECT COUNT(*) FROM users 
-        WHERE role = 'mentor' 
+        WHERE LOWER(TRIM(role)) IN ('mentor', 'industry mentor') 
           AND is_verified = 1
       ) as totalMentors`,
     (err, results) => {
