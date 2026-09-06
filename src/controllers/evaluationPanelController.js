@@ -23,8 +23,8 @@ const getPanelsByEvaluator = async (req, res) => {
         // instead (see calendarController.js's scheduleEvaluationPanel /
         // updateEvaluationPanel). Check both columns so a supervisor still
         // shows up as "assigned" to their own group's panel.
-        query += ` AND (LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?))`;
-        queryParams.push(`%${supervisorName}%`, `%${supervisorName}%`);
+        query += ` AND LOWER(evaluators) LIKE LOWER(?)`;
+        queryParams.push(`%${supervisorName}%`);
 
         if (date) {
             query += ` AND panel_date = ?`;
@@ -69,8 +69,8 @@ const checkEvaluatorStatus = async (req, res) => {
         // See getPanelsByEvaluator above: `evaluators` is external evaluators
         // only now, so a group's own supervisor is found via `supervisors`.
         const [results] = await db.promise().query(
-            `SELECT COUNT(*) as count FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?)`,
-            [`%${supervisorName}%`, `%${supervisorName}%`]
+            `SELECT COUNT(*) as count FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?)`,
+            [`%${supervisorName}%`]
         );
 
         const count = results[0]?.count || 0;
@@ -171,8 +171,8 @@ const getMyAssignedGroups = async (req, res) => {
         // Find assigned evaluation panels. `evaluators` is external
         // evaluators only; a group's own supervisor is found via
         // `supervisors` instead (see getPanelsByEvaluator above).
-        let panelQuery = `SELECT * FROM evaluation_panels WHERE (LOWER(evaluators) LIKE LOWER(?) OR LOWER(supervisors) LIKE LOWER(?))`;
-        const panelParams = [`%${supervisorName}%`, `%${supervisorName}%`];
+        let panelQuery = `SELECT * FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?)`;
+        const panelParams = [`%${supervisorName}%`];
 
         if (level) {
             panelQuery += ` AND academic_level = ?`;
@@ -180,7 +180,27 @@ const getMyAssignedGroups = async (req, res) => {
         }
         panelQuery += ` ORDER BY panel_date ASC, start_time ASC`;
 
-        const [panels] = await db.promise().query(panelQuery, panelParams);
+        const [panelsRaw] = await db.promise().query(panelQuery, panelParams);
+
+        // Strictly verify that the user's name is in the evaluators list (avoid partial substring collisions)
+        const panels = panelsRaw.filter(p => {
+            try {
+                let evalList = [];
+                if (Array.isArray(p.evaluators)) {
+                    evalList = p.evaluators;
+                } else if (typeof p.evaluators === 'string') {
+                    if (p.evaluators.trim().startsWith('[')) {
+                        evalList = JSON.parse(p.evaluators);
+                    } else {
+                        evalList = p.evaluators.split(',').map(s => s.trim());
+                    }
+                }
+                const target = supervisorName.trim().toLowerCase();
+                return evalList.some(name => typeof name === 'string' && name.trim().toLowerCase() === target);
+            } catch {
+                return (p.evaluators || '').toLowerCase().includes(supervisorName.trim().toLowerCase());
+            }
+        });
 
         if (panels.length === 0) {
             return res.status(200).json({ 
@@ -316,6 +336,33 @@ const getMyAssignedGroups = async (req, res) => {
                             evaluator_count: a.evaluator_count,
                         };
                     });
+
+                    // Fetch individual evaluator marks for live dynamic recalculation
+                    const [allEvaluatorMarksRows] = await db.promise().query(
+                        `SELECT 
+                            m.student_id,
+                            m.marked_by,
+                            u.name AS evaluator_name,
+                            m.marks_obtained,
+                            m.total_marks
+                         FROM marks m
+                         LEFT JOIN users u ON u.id = m.marked_by
+                         WHERE m.group_id = ? AND m.stage_id IN (?)`,
+                        [groupId, matchingStageIds]
+                    );
+
+                    var studentEvaluationsMap = {};
+                    allEvaluatorMarksRows.forEach(row => {
+                        if (!studentEvaluationsMap[row.student_id]) {
+                            studentEvaluationsMap[row.student_id] = [];
+                        }
+                        studentEvaluationsMap[row.student_id].push({
+                            evaluator_id: row.marked_by,
+                            evaluator_name: row.evaluator_name || '',
+                            marks: Number(row.marks_obtained),
+                            total_marks: Number(row.total_marks || groupTotalMarks)
+                        });
+                    });
                 }
 
                 members = memberRows.map((m) => {
@@ -334,6 +381,7 @@ const getMyAssignedGroups = async (req, res) => {
                         feedback: prev.feedback || '',
                         stage_avg_mark: stats.avg_mark !== undefined ? stats.avg_mark : null,
                         evaluator_count: stats.evaluator_count || 0,
+                        evaluations_list: (typeof studentEvaluationsMap !== 'undefined' && studentEvaluationsMap[m.student_id]) ? studentEvaluationsMap[m.student_id] : [],
                     };
                 });
             }
