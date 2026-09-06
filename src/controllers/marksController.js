@@ -123,21 +123,28 @@ const normalizeAcademicUnit = (unit) => {
     return clean || null;
 };
 
-// Resolves the department a coordinatorId is actually authorized to see,
-// straight from their own users row — never trusts a department string the
-// client might send directly. Returns null if the id is missing/unknown,
-// which callers treat as "no department restriction" (e.g. an admin viewing
-// every department, or a request with no coordinatorId at all).
-const getCoordinatorDepartment = async (coordinatorId) => {
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to (assignCoordinator sets both on their users row) — never
+// trusts either value from the client directly. Returns null if the id is
+// missing/unknown, which callers treat as "no restriction" (e.g. an admin
+// viewing every department/level, or a request with no coordinatorId at
+// all). App.tsx lets a coordinator browse any /dashboard/level-N page now —
+// this is the actual access boundary: a coordinator asking for a level that
+// isn't their own gets nothing back, same as a department that isn't theirs.
+const getCoordinatorScope = async (coordinatorId) => {
     if (!coordinatorId) return null;
     try {
         const [rows] = await db.promise().query(
-            'SELECT academic_unit FROM users WHERE id = ?',
+            'SELECT academic_unit, level FROM users WHERE id = ?',
             [coordinatorId],
         );
-        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+        if (rows.length === 0) return null;
+        return {
+            department: normalizeAcademicUnit(rows[0].academic_unit),
+            level: rows[0].level != null ? Number(rows[0].level) : null,
+        };
     } catch (error) {
-        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        console.warn('getCoordinatorScope lookup failed:', error.message);
         return null;
     }
 };
@@ -150,7 +157,7 @@ const getCoordinatorDepartment = async (coordinatorId) => {
  * aggregation logic in the PDF handler.
  *
  * `department` (already server-resolved and normalized via
- * getCoordinatorDepartment — never a raw client-supplied string) scopes the
+ * getCoordinatorScope — never a raw client-supplied string) scopes the
  * student/group list to just that department when provided. Left null for
  * callers that intentionally see every department (an admin, or a student
  * reading their own single row via ?studentId=).
@@ -376,18 +383,27 @@ const computeLevelMarksSummary = async (level, department = null) => {
  * response down to just that student's own row.
  *
  * Optional ?coordinatorId= scopes the response to just that coordinator's
- * own department — resolved server-side from their users row, never taken
- * from a client-supplied department string. Omitted entirely by callers that
- * intentionally see every department (admin's AdminLevelPage; a student's
- * own ?studentId= lookup narrows to one row anyway).
+ * own department AND level — resolved server-side from their users row,
+ * never taken from a client-supplied department string. A coordinator
+ * requesting a level that isn't their own gets an empty result rather than
+ * a department-filtered one, since App.tsx no longer blocks them from
+ * navigating to another level's page in the first place. Omitted entirely
+ * by callers that intentionally see every department (admin's
+ * AdminLevelPage; a student's own ?studentId= lookup narrows to one row
+ * anyway).
  */
 const getLevelMarksSummary = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const studentId = req.query.studentId ? Number(req.query.studentId) : null;
         const coordinatorId = req.query.coordinatorId || null;
-        const department = await getCoordinatorDepartment(coordinatorId);
-        const { stages, data } = await computeLevelMarksSummary(level, department);
+        const scope = await getCoordinatorScope(coordinatorId);
+
+        if (scope && scope.level != null && scope.level !== level) {
+            return res.json({ success: true, level, stages: [], data: [] });
+        }
+
+        const { stages, data } = await computeLevelMarksSummary(level, scope ? scope.department : null);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
         return res.json({ success: true, level, stages, data: scopedData });
     } catch (error) {
@@ -412,8 +428,14 @@ const downloadMarksDistributionPdf = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const coordinatorId = req.query.coordinatorId || null;
-        const department = await getCoordinatorDepartment(coordinatorId);
-        const { data: students } = await computeLevelMarksSummary(level, department);
+        const scope = await getCoordinatorScope(coordinatorId);
+        // A coordinator requesting a level that isn't their own gets a
+        // report with no students in it, rather than one scoped to their
+        // department at the wrong level.
+        const department = scope ? scope.department : null;
+        const students = (scope && scope.level != null && scope.level !== level)
+            ? []
+            : (await computeLevelMarksSummary(level, department)).data;
 
         const marks = students
             .map((s) => Number(s.final_mark))

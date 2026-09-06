@@ -19,17 +19,25 @@ const normalizeAcademicUnit = (unit) => {
     return clean || null;
 };
 
-// Resolves the department a coordinatorId is actually authorized to see,
-// straight from their own users row — never trusts a department string the
-// client might send directly. Returns null (no restriction) if the id is
-// missing/unknown.
-const getCoordinatorDepartment = async (coordinatorId) => {
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to, straight from their own users row — never trusts either
+// value from the client directly. Returns null (no restriction) if the id
+// is missing/unknown. App.tsx lets a coordinator browse any
+// /dashboard/level-N page now — this is the actual access boundary: a
+// coordinator only ever sees panels for their own department at their own
+// level, regardless of which level's Calendar page they're looking at (this
+// endpoint isn't itself scoped to one level — it feeds the whole calendar).
+const getCoordinatorScope = async (coordinatorId) => {
     if (!coordinatorId) return null;
     try {
-        const [rows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
-        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+        const [rows] = await dbPromise.query('SELECT academic_unit, level FROM users WHERE id = ?', [coordinatorId]);
+        if (rows.length === 0) return null;
+        return {
+            department: normalizeAcademicUnit(rows[0].academic_unit),
+            level: rows[0].level != null ? Number(rows[0].level) : null,
+        };
     } catch (error) {
-        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        console.warn('getCoordinatorScope lookup failed:', error.message);
         return null;
     }
 };
@@ -231,17 +239,19 @@ const updateEvaluationPanel = async (req, res) => {
  * raised.
  */
 // Optional ?coordinatorId= scopes the response to just that coordinator's
-// own department (resolved server-side above, never a client-supplied
-// department string) — previously this returned every panel system-wide
-// regardless of who created the underlying group, so a coordinator's
-// Calendar "Upcoming Panels" list showed every other department's panels
-// too.
+// own department AND level (resolved server-side above, never a
+// client-supplied string) — previously this returned every panel
+// system-wide regardless of who created the underlying group, so a
+// coordinator's Calendar "Upcoming Panels" list showed every other
+// department's (and every other level's) panels too.
 const getUpcomingPanels = async (req, res) => {
     try {
         await ensureEvaluationPanelStatusColumn();
 
         const coordinatorId = req.query.coordinatorId || null;
-        const department = await getCoordinatorDepartment(coordinatorId);
+        const scope = await getCoordinatorScope(coordinatorId);
+        const department = scope ? scope.department : null;
+        const level = scope ? scope.level : null;
 
         const query = `
             SELECT
@@ -259,6 +269,7 @@ const getUpcomingPanels = async (req, res) => {
             LEFT JOIN users u1 ON u1.id = pg.supervisor_id
             LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
             WHERE ep.panel_date >= CURRENT_DATE AND ep.status != 'completed'
+              AND (? IS NULL OR ep.academic_level = ?)
               AND (? IS NULL OR
                    CASE
                      WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
@@ -270,11 +281,61 @@ const getUpcomingPanels = async (req, res) => {
         `;
 
         // Await the rows from the database and forward them to the client.
-        const [results] = await db.promise().query(query, [department, department]);
+        const [results] = await db.promise().query(query, [level, level, department, department]);
         res.status(200).json(results);
     } catch (error) {
         console.error('Database error (getUpcomingPanels):', error);
         res.status(500).json({ error: 'Failed to fetch upcoming panels' });
+    }
+};
+
+/**
+ * Panel completion status for every (group, stage) at a level, regardless
+ * of panel_date. getUpcomingPanels can't be reused for this: it drops any
+ * panel whose date has passed, which by the time a coordinator is reviewing
+ * marks in the Reports tab is true for nearly every panel, so it would make
+ * an untouched (never-completed) panel look identical to a genuinely
+ * completed one. This endpoint answers the narrower question the Reports
+ * tab's "Complete" button actually needs — "is THIS panel's status still
+ * active?" — straight from evaluation_panels.status, independent of date.
+ * Optional ?coordinatorId= scopes to that coordinator's own department,
+ * same as getUpcomingPanels.
+ */
+const getPanelStatusForLevel = async (req, res) => {
+    try {
+        await ensureEvaluationPanelStatusColumn();
+
+        const level = Number(req.params.level);
+        if (!level) {
+            return res.status(400).json({ error: 'A valid level is required.' });
+        }
+
+        const coordinatorId = req.query.coordinatorId || null;
+        const scope = await getCoordinatorScope(coordinatorId);
+        const department = scope ? scope.department : null;
+
+        const query = `
+            SELECT ep.target_group, ep.evaluation_type, ep.academic_level, ep.status
+            FROM evaluation_panels ep
+            LEFT JOIN project_groups pg ON (
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))
+                AND pg.level = ep.academic_level
+            )
+            WHERE ep.academic_level = ?
+              AND (? IS NULL OR
+                   CASE
+                     WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+                     WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+                     WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+                     ELSE UPPER(TRIM(pg.department))
+                   END = ?)
+        `;
+
+        const [results] = await db.promise().query(query, [level, department, department]);
+        res.status(200).json(results);
+    } catch (error) {
+        console.error('Database error (getPanelStatusForLevel):', error);
+        res.status(500).json({ error: 'Failed to fetch panel status' });
     }
 };
 
@@ -384,6 +445,7 @@ module.exports = {
     scheduleEvaluationPanel,
     updateEvaluationPanel,
     getUpcomingPanels,
+    getPanelStatusForLevel,
     completePanelsForGroups,
     deleteEvaluationPanel,
     freezeDate,

@@ -276,28 +276,34 @@ const normalizeAcademicUnit = (unit) => {
   return clean || null;
 };
 
-// Resolves the department a coordinatorId is actually authorized to see,
-// straight from their own users row — never trusts a department string the
-// client might send directly. Returns null (no restriction) if the id is
-// missing/unknown.
-const getCoordinatorDepartment = async (coordinatorId) => {
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to, straight from their own users row — never trusts either
+// value from the client directly. Returns null (no restriction) if the id
+// is missing/unknown. App.tsx lets a coordinator browse any
+// /dashboard/level-N page now — this is the actual access boundary.
+const getCoordinatorScope = async (coordinatorId) => {
   if (!coordinatorId) return null;
   try {
     const [rows] = await db.promise().query(
-      'SELECT academic_unit FROM users WHERE id = ?',
+      'SELECT academic_unit, level FROM users WHERE id = ?',
       [coordinatorId],
     );
-    return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    if (rows.length === 0) return null;
+    return {
+      department: normalizeAcademicUnit(rows[0].academic_unit),
+      level: rows[0].level != null ? Number(rows[0].level) : null,
+    };
   } catch (error) {
-    console.warn('getCoordinatorDepartment lookup failed:', error.message);
+    console.warn('getCoordinatorScope lookup failed:', error.message);
     return null;
   }
 };
 
 // Optional ?coordinatorId= scopes the response to just that coordinator's
-// own department (resolved server-side above), so a coordinator from one
-// department can no longer see every other department's submissions at
-// their level — previously this only ever filtered by level.
+// own department AND level (resolved server-side above), so a coordinator
+// from one department can no longer see every other department's
+// submissions, and requesting a level that isn't their own returns nothing
+// rather than their department's data at the wrong level.
 const getCoordinatorSubmissionsByLevel = async (req, res) => {
   const level = Number(req.params.level ?? req.query.level ?? 0);
 
@@ -306,7 +312,13 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
   }
 
   const coordinatorId = req.query.coordinatorId || null;
-  const department = await getCoordinatorDepartment(coordinatorId);
+  const scope = await getCoordinatorScope(coordinatorId);
+
+  if (scope && scope.level != null && scope.level !== level) {
+    return res.json({ success: true, data: [] });
+  }
+
+  const department = scope ? scope.department : null;
 
   const sql = `
     SELECT
