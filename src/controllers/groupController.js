@@ -20,6 +20,22 @@ const ensureRequestLifecycleColumns = async () => {
           await dbPromise.query(`ALTER TABLE group_requests ADD COLUMN created_group_id INT NULL`);
         }
 
+        // Distinguishes a "group of one" (Individual Project) request from a
+        // real multi-student group request — both live in this same table
+        // and reuse the exact same lifecycle (supervisor approval, final
+        // submit, coordinator creates the group), so a request row needs its
+        // own marker rather than inferring from member count (a real group
+        // could shrink to 1 member later and shouldn't retroactively look
+        // "individual"). Purely a display/tagging field for the supervisor
+        // and coordinator request lists — it doesn't change any approval
+        // logic, which already treats a 1-supervisor request as needing
+        // only that one approval.
+        if (!columnNames.has('project_type')) {
+          await dbPromise.query(
+            `ALTER TABLE group_requests ADD COLUMN project_type ENUM('group', 'individual') NOT NULL DEFAULT 'group'`
+          );
+        }
+
         const [fkCheck] = await dbPromise.query(
           `SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'group_requests' AND COLUMN_NAME = 'created_group_id' LIMIT 1`
@@ -525,7 +541,8 @@ const getCoordinatorApprovedRequests = async (req, res) => {
         created_at: row.created_at,
         is_group_created: !!row.is_group_created,
         created_group_id: row.created_group_id || null,
-        group_status: row.is_group_created ? 'already_created' : 'pending_creation'
+        group_status: row.is_group_created ? 'already_created' : 'pending_creation',
+        project_type: row.project_type || 'group',
       };
     }));
 
@@ -601,6 +618,28 @@ const createGroup = async (req, res) => {
     if (!resolvedDepartment && leaderId) {
       const [leaderRows] = await connection.query('SELECT academic_unit FROM users WHERE id = ?', [leaderId]);
       resolvedDepartment = leaderRows[0]?.academic_unit || null;
+    }
+
+    // Reject if the group's level no longer matches every member's CURRENT
+    // academic level. createGroupRequest only validates this at submission
+    // time — if a student's level is corrected/changed any time afterward
+    // (before the coordinator gets around to creating the group), this step
+    // would otherwise silently create a real group at the wrong level with
+    // no error at all.
+    if (Array.isArray(memberIds) && memberIds.length > 0) {
+      const [memberLevelRows] = await connection.query(
+        `SELECT id, name, level FROM users WHERE id IN (?)`,
+        [memberIds]
+      );
+      const levelMismatched = memberLevelRows.filter((m) => Number(m.level) !== Number(level));
+      if (levelMismatched.length > 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          error: 'One or more members’ current academic level no longer matches this group’s level. Ask them to resubmit their group request at their current level.',
+          level_mismatched_member_ids: levelMismatched.map((m) => m.id),
+        });
+      }
     }
 
     let insertQuery = `INSERT INTO project_groups (group_name, level, supervisor_id, supervisor_id_2, department`;
@@ -1018,8 +1057,15 @@ const createGroupRequest = async (req, res) => {
     : req.body.supervisor_id
       ? [req.body.supervisor_id]
       : [];
+  // 'individual' for a Request Supervisor submission (Individual Project
+  // side of the Level 3/4 toggle — see RequestSupervisor.tsx), 'group'
+  // otherwise. Purely a tag for the supervisor/coordinator request lists —
+  // everything else (approval, final submit, group creation) is identical.
+  const projectType = req.body.project_type === 'individual' ? 'individual' : 'group';
 
   try {
+    await ensureRequestLifecycleColumns();
+
     if (supervisorIds.length === 0) {
       return res.status(400).json({ error: 'At least one supervisor must be selected.' });
     }
@@ -1197,16 +1243,17 @@ const createGroupRequest = async (req, res) => {
           `UPDATE group_requests
            SET group_name = ?, members_list = ?, request_message = ?, status = 'pending',
                rejection_reason = NULL, supervisor_id = NULL, is_final_submitted = FALSE,
-               is_group_created = FALSE, created_group_id = NULL, processed_at = NOW()
+               is_group_created = FALSE, created_group_id = NULL, processed_at = NOW(),
+               project_type = ?
            WHERE request_id = ?`,
-          [group_name, members_list, request_message, requestId]
+          [group_name, members_list, request_message, projectType, requestId]
         );
         await conn.query(`DELETE FROM group_request_supervisors WHERE request_id = ?`, [requestId]);
       } else {
         const [result] = await conn.query(
-          `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level, status, created_at)
-           VALUES (?, ?, ?, ?, NULL, ?, 'pending', NOW())`,
-          [group_name, members_list, request_message, student_id, project_level]
+          `INSERT INTO group_requests (group_name, members_list, request_message, student_id, supervisor_id, project_level, status, created_at, project_type)
+           VALUES (?, ?, ?, ?, NULL, ?, 'pending', NOW(), ?)`,
+          [group_name, members_list, request_message, student_id, project_level, projectType]
         );
         requestId = result.insertId;
       }
@@ -1392,6 +1439,23 @@ const approveGroupRequest = async (req, res) => {
       return res.status(400).json({ error: 'No valid student members found to form the group' });
     }
 
+    // Reject if this request's project_level no longer matches every
+    // resolved member's (including the leader's) CURRENT academic level —
+    // see the matching check in createGroup. This only blocks actually
+    // creating the group; the request itself stays visible wherever it
+    // already was.
+    const [approveLevelRows] = await dbPromise.query(
+      `SELECT id, name, level FROM users WHERE id IN (?)`,
+      [resolvedMembers]
+    );
+    const approveLevelMismatched = approveLevelRows.filter((m) => Number(m.level) !== normalizedLevel);
+    if (approveLevelMismatched.length > 0) {
+      return res.status(400).json({
+        error: 'One or more members’ current academic level no longer matches this request’s level. Ask them to resubmit their group request at their current level.',
+        level_mismatched_member_ids: approveLevelMismatched.map((m) => m.id),
+      });
+    }
+
     // Create group and members within a transaction
     const conn = await dbPromise.getConnection();
     try {
@@ -1487,7 +1551,7 @@ const getPendingRequestsForSupervisor = async (req, res) => {
 
     const [rows] = await dbPromise.query(
       `SELECT gr.request_id, gr.group_name, gr.members_list, gr.request_message,
-              gr.project_level, gr.student_id, gr.created_at,
+              gr.project_level, gr.student_id, gr.created_at, gr.project_type,
               grs.id AS grs_id, grs.status AS my_status,
               student.name AS student_name, student.university_id, student.academic_unit AS department,
               supervisor.name AS supervisor_name
@@ -1517,6 +1581,7 @@ const getPendingRequestsForSupervisor = async (req, res) => {
       supervisor_id: supervisorId,
       supervisor_name: row.supervisor_name,
       created_at: row.created_at,
+      project_type: row.project_type || 'group',
     }));
 
     res.json({ success: true, data });

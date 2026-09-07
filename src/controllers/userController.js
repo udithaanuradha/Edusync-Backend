@@ -15,26 +15,31 @@ const normalizeAcademicUnit = (unit) => {
   return clean || null;
 };
 
-// Resolves the department a coordinatorId is actually authorized to see,
-// straight from their own users row — never trusts a department string the
-// client might send directly. Returns null (no restriction) if the id is
-// missing/unknown.
-const getCoordinatorDepartment = async (coordinatorId) => {
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to, straight from their own users row — never trusts either
+// value from the client directly. Returns null (no restriction) if the id
+// is missing/unknown. App.tsx lets a coordinator browse any
+// /dashboard/level-N page now — this is the actual access boundary.
+const getCoordinatorScope = async (coordinatorId) => {
   if (!coordinatorId) return null;
   try {
-    const [rows] = await dbPromise.query('SELECT academic_unit FROM users WHERE id = ?', [coordinatorId]);
-    return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+    const [rows] = await dbPromise.query('SELECT academic_unit, level FROM users WHERE id = ?', [coordinatorId]);
+    if (rows.length === 0) return null;
+    return {
+      department: normalizeAcademicUnit(rows[0].academic_unit),
+      level: rows[0].level != null ? Number(rows[0].level) : null,
+    };
   } catch (error) {
-    console.warn('getCoordinatorDepartment lookup failed:', error.message);
+    console.warn('getCoordinatorScope lookup failed:', error.message);
     return null;
   }
 };
 
 // Search Student for Group — a coordinator adding a member by exact
 // university ID. Optional ?coordinatorId= scopes the lookup to that
-// coordinator's own department (resolved server-side above), so a
-// coordinator can no longer pull in and add a student from a different
-// department just by knowing their id.
+// coordinator's own department AND level (resolved server-side above), so a
+// coordinator can no longer pull in a student from a different department,
+// or from a level that isn't their own, just by knowing their id.
 const searchStudentForGroup = async (req, res) => {
   const { uniId, level, coordinatorId } = req.query;
 
@@ -43,7 +48,13 @@ const searchStudentForGroup = async (req, res) => {
   }
 
   try {
-    const department = await getCoordinatorDepartment(coordinatorId);
+    const scope = await getCoordinatorScope(coordinatorId);
+
+    if (scope && scope.level != null && scope.level !== Number(level)) {
+      return res.status(404).json({ error: "No student found with this ID for this Academic Level." });
+    }
+
+    const department = scope ? scope.department : null;
 
     const sql = `
       SELECT id, name, university_id, email, level
@@ -123,7 +134,9 @@ const getUsersByRole = async (req, res) => {
         m.marking_count,
         gm.joined_group_at,
         ann.last_announcement,
-        msg.last_message_at
+        msg.last_message_at,
+        COALESCE(mg.assigned_groups_count, 0) as assigned_groups_count,
+        mg.assigned_groups
       FROM users u
       LEFT JOIN (
         SELECT student_id, MAX(submitted_at) as last_submission, COUNT(*) as submission_count 
@@ -150,6 +163,20 @@ const getUsersByRole = async (req, res) => {
         FROM messages_v2 
         GROUP BY sender_id
       ) msg ON msg.sender_id = u.id
+      LEFT JOIN (
+        SELECT mentor_id, COUNT(DISTINCT group_id) as assigned_groups_count,
+               GROUP_CONCAT(DISTINCT group_name ORDER BY group_name SEPARATOR ', ') as assigned_groups
+        FROM (
+          SELECT pgm.mentor_id, pgm.group_id, pg.group_name
+          FROM project_group_mentors pgm
+          JOIN project_groups pg ON pg.id = pgm.group_id
+          UNION
+          SELECT pg.mentor_id, pg.id as group_id, pg.group_name
+          FROM project_groups pg
+          WHERE pg.mentor_id IS NOT NULL
+        ) all_mg
+        GROUP BY mentor_id
+      ) mg ON mg.mentor_id = u.id
       ${whereClause}
       ORDER BY u.name ASC
     `;
@@ -211,9 +238,11 @@ const getUsersByRole = async (req, res) => {
         is_verified: u.is_verified,
         last_login: u.last_login,
         created_at: u.created_at,
-        last_action: hasAction ? latestAction : (u.last_login ? 'Logged In to Portal' : 'Enrolled User'),
+        last_action: (u.role === 'mentor' && u.assigned_groups) ? `Mentoring: ${u.assigned_groups}` : (hasAction ? latestAction : (u.last_login ? 'Logged In to Portal' : 'Enrolled User')),
         last_action_time: latestTime,
-        has_logged_in: Boolean(u.last_login)
+        has_logged_in: Boolean(u.last_login),
+        assigned_groups_count: Number(u.assigned_groups_count || 0),
+        assigned_groups: u.assigned_groups || null
       };
     });
 
@@ -254,10 +283,17 @@ const getStudentsByLevel = async (req, res) => {
 
     // Coordinator-facing call (GroupManagement.tsx's "add member" search) —
     // optional ?coordinatorId= scopes the list to that coordinator's own
-    // department (resolved server-side above), so a coordinator can no
-    // longer see and add students from every other department at this
-    // level; previously this branch returned everyone unfiltered.
-    const department = await getCoordinatorDepartment(coordinatorId);
+    // department AND level (resolved server-side above), so a coordinator
+    // can no longer see students from another department, or from a level
+    // that isn't their own, at all; previously this branch returned every
+    // department unfiltered.
+    const scope = await getCoordinatorScope(coordinatorId);
+
+    if (scope && scope.level != null && scope.level !== Number(level)) {
+      return res.status(200).json([]);
+    }
+
+    const department = scope ? scope.department : null;
 
     const [results] = await dbPromise.query(
       `SELECT id, name, university_id, academic_unit AS department, level

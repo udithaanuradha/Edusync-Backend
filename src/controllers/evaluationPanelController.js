@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { ensureEvaluationPanelStatusColumn } = require('./calendarController');
 
 /**
  * 1. Fetch Panels by Evaluator / Date / Level
@@ -15,14 +16,21 @@ const getPanelsByEvaluator = async (req, res) => {
             });
         }
 
-        let query = `SELECT * FROM evaluation_panels WHERE 1=1`;
+        let query = `
+            SELECT ep.*, pg.department
+            FROM evaluation_panels ep
+            LEFT JOIN project_groups pg ON (
+                LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))
+                AND pg.level = ep.academic_level
+            )
+            WHERE 1=1
+        `;
         const queryParams = [];
 
-        // `evaluators` now holds only the external evaluators the coordinator
-        // hand-picked; the group's own supervisor(s) live in `supervisors`
-        // instead (see calendarController.js's scheduleEvaluationPanel /
-        // updateEvaluationPanel). Check both columns so a supervisor still
-        // shows up as "assigned" to their own group's panel.
+        if (req.query.includeCompleted !== 'true') {
+            query += ` AND COALESCE(ep.status, '') != 'completed'`;
+        }
+
         query += ` AND LOWER(evaluators) LIKE LOWER(?)`;
         queryParams.push(`%${supervisorName}%`);
 
@@ -173,6 +181,10 @@ const getMyAssignedGroups = async (req, res) => {
         // `supervisors` instead (see getPanelsByEvaluator above).
         let panelQuery = `SELECT * FROM evaluation_panels WHERE LOWER(evaluators) LIKE LOWER(?)`;
         const panelParams = [`%${supervisorName}%`];
+
+        if (req.query.includeCompleted !== 'true') {
+            panelQuery += ` AND COALESCE(status, '') != 'completed'`;
+        }
 
         if (level) {
             panelQuery += ` AND academic_level = ?`;
@@ -391,6 +403,7 @@ const getMyAssignedGroups = async (req, res) => {
                 group_id: groupId || panel.id,
                 group_name: panel.target_group,
                 project_title: panel.target_group,
+                department: (group?.department || '').toUpperCase() === 'IDS' ? 'ITM' : (group?.department || 'ITM'),
                 evaluation_type: panel.evaluation_type,
                 academic_level: panel.academic_level,
                 stage_id: stageId,
@@ -398,6 +411,7 @@ const getMyAssignedGroups = async (req, res) => {
                 panel_date: panel.panel_date,
                 start_time: panel.start_time,
                 duration: panel.duration,
+                status: panel.status || 'scheduled',
                 location: panel.location,
                 meeting_link: panel.meeting_link || panel.meetingLink || "",
                 evaluators: panel.evaluators,
@@ -540,11 +554,56 @@ const submitEvaluationMarks = async (req, res) => {
         // 4. Synchronize total_marks across existing evaluations for this stage/group so max mark is uniform
         if (resolvedStageId) {
             await db.promise().query(
-                `UPDATE marks 
-                 SET total_marks = ? 
+                `UPDATE marks
+                 SET total_marks = ?
                  WHERE group_id = ? AND stage_id = ?`,
                 [maxTotalMarks, group_id, resolvedStageId]
             );
+        }
+
+        // 5. Flip this panel's own evaluation_panels row to 'completed' now
+        // that its marks have actually been submitted. Previously nothing
+        // did this outside of the coordinator's manual "Complete" action on
+        // the Final stage (completePanelsForGroups in calendarController.js)
+        // — every other panel stayed 'scheduled' forever once marked, so it
+        // kept showing up in "Upcoming Panels" (filters on status !=
+        // 'completed') indefinitely, while the dashboard's "Pending
+        // Evaluations" count (filters on no marks existing yet) correctly
+        // stopped counting it — the two cards visibly disagreed. Prefers
+        // panel_id (passed by the evaluation panel screen and unambiguous);
+        // falls back to matching by group name + level + evaluation type
+        // for older callers that don't send it. Non-fatal: the marks above
+        // already saved successfully, so a failure here shouldn't fail the
+        // whole submission.
+        try {
+            await ensureEvaluationPanelStatusColumn();
+
+            if (panel_id) {
+                await db.promise().query(
+                    `UPDATE evaluation_panels SET status = 'completed' WHERE id = ? AND status != 'completed'`,
+                    [panel_id]
+                );
+            } else {
+                const [groupRows] = await db.promise().query(
+                    `SELECT group_name, level FROM project_groups WHERE id = ?`,
+                    [group_id]
+                );
+                const groupName = groupRows[0]?.group_name;
+                const levelForMatch = academic_level || groupRows[0]?.level;
+
+                if (groupName && levelForMatch && evaluation_type) {
+                    await db.promise().query(
+                        `UPDATE evaluation_panels
+                         SET status = 'completed'
+                         WHERE target_group = ? AND academic_level = ?
+                           AND LOWER(TRIM(evaluation_type)) = LOWER(TRIM(?))
+                           AND status != 'completed'`,
+                        [groupName, levelForMatch, evaluation_type]
+                    );
+                }
+            }
+        } catch (statusError) {
+            console.warn('Failed to auto-complete evaluation panel after marks submission:', statusError.message);
         }
 
         return res.status(200).json({

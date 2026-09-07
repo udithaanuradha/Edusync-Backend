@@ -123,21 +123,28 @@ const normalizeAcademicUnit = (unit) => {
     return clean || null;
 };
 
-// Resolves the department a coordinatorId is actually authorized to see,
-// straight from their own users row — never trusts a department string the
-// client might send directly. Returns null if the id is missing/unknown,
-// which callers treat as "no department restriction" (e.g. an admin viewing
-// every department, or a request with no coordinatorId at all).
-const getCoordinatorDepartment = async (coordinatorId) => {
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to (assignCoordinator sets both on their users row) — never
+// trusts either value from the client directly. Returns null if the id is
+// missing/unknown, which callers treat as "no restriction" (e.g. an admin
+// viewing every department/level, or a request with no coordinatorId at
+// all). App.tsx lets a coordinator browse any /dashboard/level-N page now —
+// this is the actual access boundary: a coordinator asking for a level that
+// isn't their own gets nothing back, same as a department that isn't theirs.
+const getCoordinatorScope = async (coordinatorId) => {
     if (!coordinatorId) return null;
     try {
         const [rows] = await db.promise().query(
-            'SELECT academic_unit FROM users WHERE id = ?',
+            'SELECT academic_unit, level FROM users WHERE id = ?',
             [coordinatorId],
         );
-        return rows.length > 0 ? normalizeAcademicUnit(rows[0].academic_unit) : null;
+        if (rows.length === 0) return null;
+        return {
+            department: normalizeAcademicUnit(rows[0].academic_unit),
+            level: rows[0].level != null ? Number(rows[0].level) : null,
+        };
     } catch (error) {
-        console.warn('getCoordinatorDepartment lookup failed:', error.message);
+        console.warn('getCoordinatorScope lookup failed:', error.message);
         return null;
     }
 };
@@ -150,7 +157,7 @@ const getCoordinatorDepartment = async (coordinatorId) => {
  * aggregation logic in the PDF handler.
  *
  * `department` (already server-resolved and normalized via
- * getCoordinatorDepartment — never a raw client-supplied string) scopes the
+ * getCoordinatorScope — never a raw client-supplied string) scopes the
  * student/group list to just that department when provided. Left null for
  * callers that intentionally see every department (an admin, or a student
  * reading their own single row via ?studentId=).
@@ -284,6 +291,20 @@ const computeLevelMarksSummary = async (level, department = null) => {
         }
 
         // Build structured summary per student
+        // Helper to check if a stage panel is completed for this group
+        const isStagePanelCompleted = (groupName, stageName) => {
+            const gLower = String(groupName || '').trim().toLowerCase();
+            const sLower = String(stageName || '').trim().toLowerCase();
+            return allLevelPanels.some((p) => {
+                const pGroup = String(p.target_group || '').trim().toLowerCase();
+                const pType = String(p.evaluation_type || '').trim().toLowerCase();
+                const pStatus = String(p.status || '').trim().toLowerCase();
+                const matchGroup = pGroup === gLower || pGroup.includes(gLower) || gLower.includes(pGroup);
+                const matchStage = pType === sLower || pType.includes(sLower) || sLower.includes(pType);
+                return matchGroup && matchStage && (pStatus === 'completed' || pStatus === 'complete');
+            });
+        };
+
         const summary = students.map((student) => {
             const studentMarks = allMarks.filter((m) => m.student_id === student.student_id);
             const stageBreakdown = {};
@@ -292,6 +313,7 @@ const computeLevelMarksSummary = async (level, department = null) => {
             let stagesEvaluatedCount = 0;
 
             canonicalStages.forEach((canonicalStg) => {
+                const isCompleted = isStagePanelCompleted(student.group_name, canonicalStg.stage_name);
                 const marksForThisStage = studentMarks.filter((m) => 
                     canonicalStg.stage_ids.includes(m.stage_id)
                 );
@@ -306,6 +328,7 @@ const computeLevelMarksSummary = async (level, department = null) => {
                         average_mark: roundedAvg,
                         total_marks: stageTotal,
                         evaluator_count: marksForThisStage.length,
+                        is_completed: isCompleted,
                         evaluators: marksForThisStage.map((sm) => ({
                             evaluator_name: sm.evaluator_name,
                             evaluator_role: sm.evaluator_role || '',
@@ -315,15 +338,19 @@ const computeLevelMarksSummary = async (level, department = null) => {
                         }))
                     };
 
-                    sumObtainedMarks += roundedAvg;
-                    sumTotalMaxMarks += stageTotal;
-                    stagesEvaluatedCount++;
+                    // Only count towards total marks and final percentage if evaluation panel is completed
+                    if (isCompleted) {
+                        sumObtainedMarks += roundedAvg;
+                        sumTotalMaxMarks += stageTotal;
+                        stagesEvaluatedCount++;
+                    }
                 } else {
                     stageBreakdown[canonicalStg.canonical_id] = {
                         stage_name: canonicalStg.stage_name,
                         average_mark: null,
                         total_marks: 60,
                         evaluator_count: 0,
+                        is_completed: isCompleted,
                         evaluators: []
                     };
                 }
@@ -389,18 +416,27 @@ const computeLevelMarksSummary = async (level, department = null) => {
  * response down to just that student's own row.
  *
  * Optional ?coordinatorId= scopes the response to just that coordinator's
- * own department — resolved server-side from their users row, never taken
- * from a client-supplied department string. Omitted entirely by callers that
- * intentionally see every department (admin's AdminLevelPage; a student's
- * own ?studentId= lookup narrows to one row anyway).
+ * own department AND level — resolved server-side from their users row,
+ * never taken from a client-supplied department string. A coordinator
+ * requesting a level that isn't their own gets an empty result rather than
+ * a department-filtered one, since App.tsx no longer blocks them from
+ * navigating to another level's page in the first place. Omitted entirely
+ * by callers that intentionally see every department (admin's
+ * AdminLevelPage; a student's own ?studentId= lookup narrows to one row
+ * anyway).
  */
 const getLevelMarksSummary = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const studentId = req.query.studentId ? Number(req.query.studentId) : null;
         const coordinatorId = req.query.coordinatorId || null;
-        const department = await getCoordinatorDepartment(coordinatorId);
-        const { stages, panels, data } = await computeLevelMarksSummary(level, department);
+        const scope = await getCoordinatorScope(coordinatorId);
+
+        if (scope && scope.level != null && scope.level !== level) {
+            return res.json({ success: true, level, stages: [], panels: [], data: [] });
+        }
+
+        const { stages, panels, data } = await computeLevelMarksSummary(level, scope ? scope.department : null);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
         return res.json({ success: true, level, stages, panels: panels || [], data: scopedData });
     } catch (error) {
@@ -425,10 +461,18 @@ const downloadMarksDistributionPdf = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const coordinatorId = req.query.coordinatorId || null;
-        const department = await getCoordinatorDepartment(coordinatorId);
-        const { data: students } = await computeLevelMarksSummary(level, department);
+        const degreeParam = req.query.degree || req.query.department || null;
+        const scope = await getCoordinatorScope(coordinatorId);
+        let department = scope ? scope.department : null;
+        if (!department && degreeParam && degreeParam !== 'ALL') {
+            department = degreeParam;
+        }
+        const students = (scope && scope.level != null && scope.level !== level)
+            ? []
+            : (await computeLevelMarksSummary(level, department)).data;
 
-        const marks = students
+        const evaluatedStudents = students.filter((s) => (s.stages_completed > 0 || s.isEvaluated) && s.final_mark !== null);
+        const marks = evaluatedStudents
             .map((s) => Number(s.final_mark))
             .filter((m) => Number.isFinite(m));
 
@@ -458,13 +502,17 @@ const downloadMarksDistributionPdf = async (req, res) => {
         const maxBucketCount = Math.max(...buckets, 1);
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="Level_${level}_Marks_Distribution_Report.pdf"`);
+        const deptPrefix = department ? (department + ' ') : '';
+        const deptFilePrefix = department ? (department + '_') : '';
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="Level_${level}_${deptFilePrefix}Marks_Distribution_Report.pdf"`);
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
         doc.pipe(res);
 
         // ---- Header ----
-        doc.fontSize(20).font('Helvetica-Bold').text(`Level ${level} — Marks Distribution Report`, { align: 'center' });
+        doc.fontSize(20).font('Helvetica-Bold').text(`Level ${level} — ${deptPrefix}Marks Distribution Report`, { align: 'center' });
         doc.moveDown(0.3);
         doc.fontSize(10).font('Helvetica').fillColor('#666666')
             .text(`Generated on ${new Date().toLocaleString()}`, { align: 'center' });
@@ -476,7 +524,8 @@ const downloadMarksDistributionPdf = async (req, res) => {
         doc.moveDown(0.4);
         doc.fontSize(10).font('Helvetica');
         [
-            `Total Students: ${n}`,
+            (department ? ('Degree Program: ' + department) : 'Degree Program: All Degrees'),
+            `Total Evaluated Students: ${n}`,
             `Mean: ${mean.toFixed(2)}%`,
             `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
         ].forEach((line) => doc.text(line));

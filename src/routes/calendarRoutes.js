@@ -4,6 +4,7 @@ const {
     scheduleEvaluationPanel,
     updateEvaluationPanel,
     getUpcomingPanels,
+    getPanelStatusForLevel,
     completePanelsForGroups,
     deleteEvaluationPanel,
     freezeDate,
@@ -20,6 +21,15 @@ router.post('/panels', scheduleEvaluationPanel);
 // 2. FETCH UPCOMING PANELS (For the right sidebar)
 // ---------------------------------------------------------
 router.get('/panels', getUpcomingPanels);
+
+// ---------------------------------------------------------
+// 2.0.1 PANEL COMPLETION STATUS FOR A LEVEL, ANY DATE (For the Reports
+//       tab's per-group "Complete" button, which needs to know a panel's
+//       true status even once its date is in the past — see
+//       getPanelStatusForLevel's comment for why getUpcomingPanels can't
+//       answer this).
+// ---------------------------------------------------------
+router.get('/panels/status/level/:level', getPanelStatusForLevel);
 
 // ---------------------------------------------------------
 // 2.1 DELETE A PANEL

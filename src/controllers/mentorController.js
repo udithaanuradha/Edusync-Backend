@@ -923,6 +923,7 @@ exports.getMentorProjectDelays = async (req, res) => {
     }
 
     const groupIds = groups.map((g) => g.id);
+    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Colombo' }).format(new Date());
 
     // 2. Query all tasks from these groups where due_date is in the past and status is not COMPLETED
     const [delayedTasks] = await queryWithRetry(
@@ -931,7 +932,7 @@ exports.getMentorProjectDelays = async (req, res) => {
               u.name AS assigned_to_name, u.email AS assigned_to_email, u.university_id,
               m.id AS milestone_id, m.title AS milestone_title,
               pg.id AS group_id, pg.group_name, pg.level, pg.department,
-              DATEDIFF(CURRENT_DATE, st.due_date) AS days_overdue
+              DATEDIFF(?, st.due_date) AS days_overdue
        FROM student_tasks st
        JOIN milestones m ON m.id = st.milestone_id
        JOIN project_groups pg ON pg.id = m.group_id
@@ -939,9 +940,9 @@ exports.getMentorProjectDelays = async (req, res) => {
        WHERE m.group_id IN (?)
          AND UPPER(TRIM(st.status)) != 'COMPLETED'
          AND st.due_date IS NOT NULL
-         AND st.due_date < CURRENT_DATE
+         AND DATE(st.due_date) < ?
        ORDER BY st.due_date ASC, st.id ASC`,
-      [groupIds]
+      [todayStr, groupIds, todayStr]
     );
 
     const affectedGroups = new Set(delayedTasks.map((t) => t.group_id)).size;
