@@ -158,6 +158,7 @@ const getCoordinatorSummary = async (req, res) => {
         pg.id AS projectId,
         pg.group_name AS groupName,
         COALESCE(u.name, 'Unassigned') AS supervisorName,
+        u2.name AS supervisorName2,
         CASE
           WHEN ${finalStageMarkedSubquery} THEN 'Completed'
           WHEN COALESCE(progress.marked_count, 0) > 0 THEN 'In Progress'
@@ -171,6 +172,7 @@ const getCoordinatorSummary = async (req, res) => {
         COALESCE(progress.last_activity, pg.created_at) AS updatedAt
       FROM project_groups pg
       LEFT JOIN users u ON u.id = pg.supervisor_id
+      LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
       LEFT JOIN (
         SELECT
           m.group_id,
@@ -245,6 +247,7 @@ const getCoordinatorSummary = async (req, res) => {
           projectId: row.projectId,
           groupName: row.groupName,
           supervisorName: row.supervisorName,
+          supervisorName2: row.supervisorName2 || null,
           status: row.status,
           progress: toNumber(row.progress),
           updatedAt: row.updatedAt,
