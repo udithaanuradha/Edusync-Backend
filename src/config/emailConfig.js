@@ -51,15 +51,22 @@ const sendOtpEmail = async (toEmail, otpCode) => {
  * TYPE 2: Sends a Transactional Mentor Invitation HTML email.
  */
 const sendMentorInviteEmail = async (toEmail, mentorName, groupName, setupUrl) => {
+    const isMultiple = Boolean(groupName && (groupName.includes('&') || groupName.includes(',')));
+    const groupDisplay = isMultiple
+        ? `Groups: <b>${groupName}</b>`
+        : `<b>${groupName && groupName.toLowerCase().startsWith('group') ? groupName : 'Group ' + (groupName || '')}</b>`;
+
     const mailOptions = {
         from: '"EduSync Support" <medinieedirisinghe@gmail.com>',
         to: toEmail,
-        subject: "Invitation: Join Edusync as an Industry Mentor",
+        subject: isMultiple
+            ? `Invitation: Join EduSync as Industry Mentor for ${groupName}`
+            : `Invitation: Join Edusync as an Industry Mentor`,
         html: `
           <html>
             <body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6; color: #1e293b;">
               <h3 style="color: #0f172a;">Hello ${mentorName},</h3>
-              <p>You have been assigned as the Industry Mentor for <b>Group ${groupName}</b>.</p>
+              <p>You have been assigned as the Industry Mentor for ${groupDisplay}.</p>
               <p>To access your mentor dashboard and review project progress, please configure your account credentials by clicking the button below:</p>
               
               <p style="margin: 20px 0;">
@@ -146,10 +153,51 @@ const sendMentorOffboardingAppreciationEmail = async (toEmail, mentorName, group
     return await transporter.sendMail(mailOptions);
 };
 
+/**
+ * TYPE 5: Sends a New Group Assignment Notification HTML email to an existing verified mentor.
+ */
+const sendMentorNewGroupAssignmentEmail = async (toEmail, mentorName, groupName, loginUrl) => {
+    const isMultiple = Boolean(groupName && (groupName.includes('&') || groupName.includes(',')));
+    const groupDisplay = isMultiple
+        ? `Groups: <b>${groupName}</b>`
+        : `<b>${groupName && groupName.toLowerCase().startsWith('group') ? groupName : 'Group ' + (groupName || '')}</b>`;
+
+    const mailOptions = {
+        from: '"EduSync Support" <medinieedirisinghe@gmail.com>',
+        to: toEmail,
+        subject: isMultiple
+            ? `New Project Groups Assigned in EduSync: ${groupName}`
+            : `New Project Group Assigned in EduSync: ${groupName}`,
+        html: `
+          <html>
+            <body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.6; color: #1e293b;">
+              <h3 style="color: #0f172a;">Hello ${mentorName},</h3>
+              <p>You have been assigned as the Industry Mentor for ${groupDisplay} in EduSync.</p>
+              <p>Since you already have an active EduSync mentor account, you can simply log in with your existing credentials to access your new group dashboard, review tasks, and provide guidance.</p>
+              
+              <p style="margin: 24px 0;">
+                <a href="${loginUrl}" style="background-color:#2563eb;color:#ffffff;padding:12px 24px;text-decoration:none;border-radius:6px;display:inline-block;font-weight:bold;font-size:14px;">Log In to Dashboard</a>
+              </p>
+              
+              <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+                <p style="color: #64748b; font-size: 12px; margin: 0;">Portal Login: <a href="${loginUrl}" style="color: #2563eb;">${loginUrl}</a></p>
+              </div>
+
+              <br/>
+              <p style="color: #475569; font-size: 13px;">Best regards,<br/>Academic Project Coordination Team</p>
+            </body>
+          </html>
+        `
+    };
+
+    return await transporter.sendMail(mailOptions);
+};
+
 // Export all functions so different parts of the backend can use them
 module.exports = { 
     sendOtpEmail, 
     sendMentorInviteEmail,
     sendPasswordResetLinkEmail,
-    sendMentorOffboardingAppreciationEmail
+    sendMentorOffboardingAppreciationEmail,
+    sendMentorNewGroupAssignmentEmail
 };

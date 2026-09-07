@@ -291,6 +291,20 @@ const computeLevelMarksSummary = async (level, department = null) => {
         }
 
         // Build structured summary per student
+        // Helper to check if a stage panel is completed for this group
+        const isStagePanelCompleted = (groupName, stageName) => {
+            const gLower = String(groupName || '').trim().toLowerCase();
+            const sLower = String(stageName || '').trim().toLowerCase();
+            return allLevelPanels.some((p) => {
+                const pGroup = String(p.target_group || '').trim().toLowerCase();
+                const pType = String(p.evaluation_type || '').trim().toLowerCase();
+                const pStatus = String(p.status || '').trim().toLowerCase();
+                const matchGroup = pGroup === gLower || pGroup.includes(gLower) || gLower.includes(pGroup);
+                const matchStage = pType === sLower || pType.includes(sLower) || sLower.includes(pType);
+                return matchGroup && matchStage && (pStatus === 'completed' || pStatus === 'complete');
+            });
+        };
+
         const summary = students.map((student) => {
             const studentMarks = allMarks.filter((m) => m.student_id === student.student_id);
             const stageBreakdown = {};
@@ -299,6 +313,7 @@ const computeLevelMarksSummary = async (level, department = null) => {
             let stagesEvaluatedCount = 0;
 
             canonicalStages.forEach((canonicalStg) => {
+                const isCompleted = isStagePanelCompleted(student.group_name, canonicalStg.stage_name);
                 const marksForThisStage = studentMarks.filter((m) => 
                     canonicalStg.stage_ids.includes(m.stage_id)
                 );
@@ -313,6 +328,7 @@ const computeLevelMarksSummary = async (level, department = null) => {
                         average_mark: roundedAvg,
                         total_marks: stageTotal,
                         evaluator_count: marksForThisStage.length,
+                        is_completed: isCompleted,
                         evaluators: marksForThisStage.map((sm) => ({
                             evaluator_name: sm.evaluator_name,
                             evaluator_role: sm.evaluator_role || '',
@@ -322,15 +338,19 @@ const computeLevelMarksSummary = async (level, department = null) => {
                         }))
                     };
 
-                    sumObtainedMarks += roundedAvg;
-                    sumTotalMaxMarks += stageTotal;
-                    stagesEvaluatedCount++;
+                    // Only count towards total marks and final percentage if evaluation panel is completed
+                    if (isCompleted) {
+                        sumObtainedMarks += roundedAvg;
+                        sumTotalMaxMarks += stageTotal;
+                        stagesEvaluatedCount++;
+                    }
                 } else {
                     stageBreakdown[canonicalStg.canonical_id] = {
                         stage_name: canonicalStg.stage_name,
                         average_mark: null,
                         total_marks: 60,
                         evaluator_count: 0,
+                        is_completed: isCompleted,
                         evaluators: []
                     };
                 }
@@ -441,16 +461,18 @@ const downloadMarksDistributionPdf = async (req, res) => {
     try {
         const level = Number(req.params.level || 2);
         const coordinatorId = req.query.coordinatorId || null;
+        const degreeParam = req.query.degree || req.query.department || null;
         const scope = await getCoordinatorScope(coordinatorId);
-        // A coordinator requesting a level that isn't their own gets a
-        // report with no students in it, rather than one scoped to their
-        // department at the wrong level.
-        const department = scope ? scope.department : null;
+        let department = scope ? scope.department : null;
+        if (!department && degreeParam && degreeParam !== 'ALL') {
+            department = degreeParam;
+        }
         const students = (scope && scope.level != null && scope.level !== level)
             ? []
             : (await computeLevelMarksSummary(level, department)).data;
 
-        const marks = students
+        const evaluatedStudents = students.filter((s) => (s.stages_completed > 0 || s.isEvaluated) && s.final_mark !== null);
+        const marks = evaluatedStudents
             .map((s) => Number(s.final_mark))
             .filter((m) => Number.isFinite(m));
 
@@ -480,13 +502,17 @@ const downloadMarksDistributionPdf = async (req, res) => {
         const maxBucketCount = Math.max(...buckets, 1);
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="Level_${level}_Marks_Distribution_Report.pdf"`);
+        const deptPrefix = department ? (department + ' ') : '';
+        const deptFilePrefix = department ? (department + '_') : '';
+
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="Level_${level}_${deptFilePrefix}Marks_Distribution_Report.pdf"`);
 
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
         doc.pipe(res);
 
         // ---- Header ----
-        doc.fontSize(20).font('Helvetica-Bold').text(`Level ${level} — Marks Distribution Report`, { align: 'center' });
+        doc.fontSize(20).font('Helvetica-Bold').text(`Level ${level} — ${deptPrefix}Marks Distribution Report`, { align: 'center' });
         doc.moveDown(0.3);
         doc.fontSize(10).font('Helvetica').fillColor('#666666')
             .text(`Generated on ${new Date().toLocaleString()}`, { align: 'center' });
@@ -498,7 +524,8 @@ const downloadMarksDistributionPdf = async (req, res) => {
         doc.moveDown(0.4);
         doc.fontSize(10).font('Helvetica');
         [
-            `Total Students: ${n}`,
+            (department ? ('Degree Program: ' + department) : 'Degree Program: All Degrees'),
+            `Total Evaluated Students: ${n}`,
             `Mean: ${mean.toFixed(2)}%`,
             `Pass Rate: ${passRate.toFixed(1)}% (${passCount}/${n})`,
         ].forEach((line) => doc.text(line));

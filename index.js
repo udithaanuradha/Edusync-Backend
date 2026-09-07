@@ -449,7 +449,7 @@ app.get("/api/admin/stats", (req, res) => {
           AND designation IS NOT NULL
       ) as totalLecturers,
       (SELECT COUNT(*) FROM users 
-        WHERE role = 'mentor' 
+        WHERE LOWER(TRIM(role)) IN ('mentor', 'industry mentor') 
           AND is_verified = 1
       ) as totalMentors`,
     (err, results) => {
@@ -533,6 +533,10 @@ app.use("/api/submissions", submissionRoutes);
 // Milestones & Tasks (Combined from HEAD)
 const milestoneRoutes = require("./src/routes/milestoneRoutes");
 app.use("/api/milestones", milestoneRoutes);
+
+// Student's Group/Individual project-type choice (Level 3 & 4 toggle)
+const projectTypeRoutes = require("./src/routes/projectTypeRoutes");
+app.use("/api/project-type", projectTypeRoutes);
 
 // Dashboard & Marks (Combined from develop)
 const dashboardRoutes = require("./src/routes/dashboardRoutes");

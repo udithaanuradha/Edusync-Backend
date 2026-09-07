@@ -155,7 +155,9 @@ const createMilestone = async (req, res) => {
       return res.status(400).json({ success: false, error: 'group_id and title are required.' });
     }
 
-    // Access Control
+    // Access Control — any group member may create a milestone (only
+    // *editing* an existing one, via updateMilestoneDetails, is leader-only;
+    // creating one is intentionally open to the whole group).
     if (userId && userRole) {
       const isMember = await verifyMembership(userId, userRole, group_id);
       if (!isMember) {

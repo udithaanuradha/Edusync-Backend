@@ -134,7 +134,9 @@ const getUsersByRole = async (req, res) => {
         m.marking_count,
         gm.joined_group_at,
         ann.last_announcement,
-        msg.last_message_at
+        msg.last_message_at,
+        COALESCE(mg.assigned_groups_count, 0) as assigned_groups_count,
+        mg.assigned_groups
       FROM users u
       LEFT JOIN (
         SELECT student_id, MAX(submitted_at) as last_submission, COUNT(*) as submission_count 
@@ -161,6 +163,20 @@ const getUsersByRole = async (req, res) => {
         FROM messages_v2 
         GROUP BY sender_id
       ) msg ON msg.sender_id = u.id
+      LEFT JOIN (
+        SELECT mentor_id, COUNT(DISTINCT group_id) as assigned_groups_count,
+               GROUP_CONCAT(DISTINCT group_name ORDER BY group_name SEPARATOR ', ') as assigned_groups
+        FROM (
+          SELECT pgm.mentor_id, pgm.group_id, pg.group_name
+          FROM project_group_mentors pgm
+          JOIN project_groups pg ON pg.id = pgm.group_id
+          UNION
+          SELECT pg.mentor_id, pg.id as group_id, pg.group_name
+          FROM project_groups pg
+          WHERE pg.mentor_id IS NOT NULL
+        ) all_mg
+        GROUP BY mentor_id
+      ) mg ON mg.mentor_id = u.id
       ${whereClause}
       ORDER BY u.name ASC
     `;
@@ -222,9 +238,11 @@ const getUsersByRole = async (req, res) => {
         is_verified: u.is_verified,
         last_login: u.last_login,
         created_at: u.created_at,
-        last_action: hasAction ? latestAction : (u.last_login ? 'Logged In to Portal' : 'Enrolled User'),
+        last_action: (u.role === 'mentor' && u.assigned_groups) ? `Mentoring: ${u.assigned_groups}` : (hasAction ? latestAction : (u.last_login ? 'Logged In to Portal' : 'Enrolled User')),
         last_action_time: latestTime,
-        has_logged_in: Boolean(u.last_login)
+        has_logged_in: Boolean(u.last_login),
+        assigned_groups_count: Number(u.assigned_groups_count || 0),
+        assigned_groups: u.assigned_groups || null
       };
     });
 
