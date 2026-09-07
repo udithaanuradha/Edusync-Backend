@@ -100,7 +100,9 @@ const createAnnouncement = (req, res) => {
  */
 const getAnnouncements = (req, res) => {
   const userRole = firstNonEmptyString(req.query.role, req.query.userRole, req.query.audience);
+  const userDesignation = firstNonEmptyString(req.query.designation, req.query.userDesignation);
   const userLevel = firstNonEmptyString(req.query.level, req.query.userLevel);
+  const userDept = firstNonEmptyString(req.query.department, req.query.academic_unit, req.query.dept);
   const authorName = firstNonEmptyString(req.query.author, req.query.author_name, req.query.authorName);
   const allAudienceOnly = req.query.all_audience === 'true';
   const currentUserId = req.query.exclude_author_id ? parseInt(req.query.exclude_author_id, 10) : null;
@@ -141,9 +143,32 @@ const getAnnouncements = (req, res) => {
       params.push('%admin%');
     }
     // 4. COORDINATOR: Uses "Rule of Relevance"
-    else if (userRole && userRole.toLowerCase() === 'coordinator') {
-      whereConditions.push(`(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?)`);
-      params.push('%coordinator%');
+    else if (
+      (userRole && userRole.toLowerCase() === 'coordinator') ||
+      (userDesignation && userDesignation.toLowerCase() === 'coordinator')
+    ) {
+      let coordSql = `(
+        LOWER(target_audience) IN ('all', 'all system users')
+        OR (
+          LOWER(target_audience) LIKE '%coordinator%'
+      `;
+
+      if (userLevel) {
+        coordSql += ` AND (LOWER(target_audience) NOT LIKE '%level%' OR LOWER(target_audience) LIKE ? OR LOWER(target_audience) LIKE ?)`;
+        params.push(`%level ${userLevel}%`, `%level${userLevel}%`);
+      }
+
+      if (userDept) {
+        coordSql += ` AND (
+          (LOWER(target_audience) NOT LIKE '% - it%' AND LOWER(target_audience) NOT LIKE '% - ids%' AND LOWER(target_audience) NOT LIKE '% - cm%')
+          OR LOWER(target_audience) LIKE ?
+        )`;
+        params.push(`% - ${userDept.toLowerCase()}%`);
+      }
+
+      coordSql += `  )
+      )`;
+      whereConditions.push(coordSql);
     }
     // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
     else if (userRole) {
