@@ -15,14 +15,15 @@ const {
   getTasksByGroup,
   updateTaskStatus,
   deleteTask,
+  uploadTaskFile,
   upsertOverview,
   getOverviewByGroup,
   getScopeSectionsByGroup,
   createScopeSection,
-  claimScopeSection,
   updateScopeSection,
   deleteScopeSection
 } = require('../controllers/milestoneController');
+const { upload } = require('../config/cloudinaryConfig');
 
  
 // PROJECT OVERVIEW ROUTES
@@ -59,20 +60,20 @@ router.delete('/:id', deleteMilestone);
 
 
 // SCOPE DIVISION ROUTES — project-wide (per-group), not per-milestone.
+// Any group member creates their own section directly (capped at one per
+// student); creating it makes them its owner. No separate claim step —
+// there is no claim route any more.
 
-// List a group's (whole-project) scope sections (with claimant name resolved)
+// List a group's (whole-project) scope sections (creator name resolved)
 router.get('/group/:groupId/scope', getScopeSectionsByGroup);
 
-// Define a new scope section for a group's project (leader-only)
+// Create a new scope section, owned by the calling student immediately
 router.post('/group/:groupId/scope', createScopeSection);
 
-// Claim a still-open scope section — atomic, any group member
-router.put('/scope/:id/claim', claimScopeSection);
-
-// Edit a scope section's title/description (leader-only)
+// Edit a scope section's title/description (owner-only, no leader override)
 router.put('/scope/:id', updateScopeSection);
 
-// Delete a scope section entirely (leader-only)
+// Delete a scope section entirely (owner-only, no leader override)
 router.delete('/scope/:id', deleteScopeSection);
 
 
@@ -101,5 +102,22 @@ router.put('/tasks/:id/status', updateTaskStatus);
 
 // Delete a task
 router.delete('/tasks/:id', deleteTask);
+
+// Attach one optional file to an already-created task (task_id + uploaded_by
+// in the multipart body) — same upload.single('file') middleware
+// submissionRoutes.js already uses, its own Cloudinary folder
+// (CLOUDINARY_TASK_FOLDER, default 'task-attachments').
+router.post(
+  '/tasks/upload-file',
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, error: err.message || 'File upload failed' });
+      }
+      next();
+    });
+  },
+  uploadTaskFile
+);
 
 module.exports = router;

@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const dbPromise = db.promise();
+const { cloudinary, uploadBufferToCloudinary } = require('../config/cloudinaryConfig');
 
 let ensureTablesPromise = null;
 let ensureFeedbackSeenColumnPromise = null;
@@ -47,6 +48,23 @@ const ensureTaskStartDateColumn = async () => {
     );
   }
   await ensureTaskStartDateColumnPromise;
+};
+
+// Adds student_tasks.file_name/file_url (nullable) if they aren't there
+// yet — backs the one optional file a student can attach when creating a
+// task (see uploadTaskFile below), uploaded to Cloudinary the same way
+// Project Stage files and group Submissions already are, just into their
+// own dedicated folder so they never mix with those.
+let ensureTaskFileColumnsPromise = null;
+const ensureTaskFileColumns = async () => {
+  if (!ensureTaskFileColumnsPromise) {
+    ensureTaskFileColumnsPromise = dbPromise.query(
+      `ALTER TABLE student_tasks
+       ADD COLUMN IF NOT EXISTS file_name VARCHAR(500) NULL DEFAULT NULL,
+       ADD COLUMN IF NOT EXISTS file_url VARCHAR(1000) NULL DEFAULT NULL`
+    );
+  }
+  await ensureTaskFileColumnsPromise;
 };
 
 const ensureMilestoneTables = async () => {
@@ -102,23 +120,25 @@ const ensureMilestoneTables = async () => {
   await ensureTablesPromise;
 };
 
-// Scope Division: the WHOLE PROJECT (group) can be broken into sections a
-// leader (with supervisor/mentor input) defines, and any group member can
-// claim exactly one section for the entire project by ticking it — first
-// to claim locks it to themselves. Used to belong to a single milestone
-// (milestone_scope_sections, keyed by milestone_id) — moved to be
-// project-wide instead, since a student's one claimed section is meant to
-// represent their share of the whole project, not a different claim per
-// milestone. Renamed to project_scope_sections to match.
+// Scope Division: the WHOLE PROJECT (group) can be broken into sections —
+// any group member creates their own section directly (title +
+// description), capped at one per student, and that act of creating it is
+// what makes it theirs. There's no separate leader-curates/member-claims
+// step any more (that older two-step "leader defines sections, members
+// tick to claim one" model — and its claimScopeSection endpoint — has been
+// removed entirely). `claimed_by` is still the column name, now meaning
+// "who created and owns this section" rather than "who claimed it" — set
+// directly in the same INSERT that creates the row. Every section is
+// visible to the whole group regardless of who created it, unchanged.
+// Editing/deleting is owner-only (the creator), with no leader override.
 //
-// One-time migration on first boot after this change: since sections were
-// milestone-scoped in a way that doesn't map cleanly onto "the group's one
-// set of sections," the chosen migration path was to wipe any existing
-// milestone-scoped sections rather than guess which milestone's set should
-// carry over as the new project-wide set — leaders redefine sections fresh
-// under the new model. Safe to run on every boot: once
-// project_scope_sections exists, the old table is already gone and this
-// becomes a no-op.
+// One-time migration on first boot after the project-wide move: since
+// sections used to be milestone-scoped (milestone_scope_sections, keyed by
+// milestone_id) in a way that doesn't map cleanly onto "the group's one
+// set of sections," that migration wiped any existing milestone-scoped
+// sections rather than guess which milestone's set should carry over.
+// Safe to run on every boot: once project_scope_sections exists, the old
+// table is already gone and this becomes a no-op.
 let ensureScopeTablePromise = null;
 const ensureScopeSectionsTable = async () => {
   if (!ensureScopeTablePromise) {
@@ -186,7 +206,20 @@ const todayDateOnly = () => {
   return d;
 };
 
-const todayDateOnlyString = () => todayDateOnly().toISOString().slice(0, 10);
+// YYYY-MM-DD, built from LOCAL year/month/day — NOT toISOString(), which
+// converts to UTC first and silently shifts the date back by one day
+// whenever the server runs in a positive UTC-offset timezone (local
+// midnight on the 8th becomes "the 7th" once re-expressed in UTC). Only
+// this string form was ever at risk — the Date-object comparisons
+// elsewhere in this file (e.g. `start < todayDateOnly()`) never round-trip
+// through UTC, so they were never affected.
+const todayDateOnlyString = () => {
+  const d = todayDateOnly();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const formatDateForMessage = (value) => {
   const d = parseDateOnly(value);
@@ -201,11 +234,12 @@ const addOneYear = (date) => {
 };
 
 /**
- * Shared by createMilestone and updateMilestoneDetails.
- * `enforceNotBeforeToday` is only ever true on creation — an existing
- * milestone whose original start date has since passed (e.g. someone
- * fixing a typo in the title weeks later) should not be blocked from
- * saving just because of that.
+ * Shared by createMilestone (always passes `enforceNotBeforeToday: true`)
+ * and updateMilestoneDetails (passes `true` only when the start date is
+ * actually being changed from what's already stored) — an edit that
+ * leaves an already-past start date untouched (e.g. fixing just the
+ * title) isn't blocked just because time has passed since it was first
+ * set, but no save can ever newly set a start date in the past.
  */
 const validateMilestoneDates = (startDateInput, dueDateInput, { enforceNotBeforeToday }) => {
   const start = parseDateOnly(startDateInput);
@@ -213,6 +247,13 @@ const validateMilestoneDates = (startDateInput, dueDateInput, { enforceNotBefore
 
   if (enforceNotBeforeToday && start && start < todayDateOnly()) {
     return 'Start date cannot be before today.';
+  }
+
+  // Applies on both create and edit — unlike enforceNotBeforeToday, there's
+  // no case where an end date before the milestone's own start date should
+  // ever be allowed to save.
+  if (start && due && due < start) {
+    return 'Start date cannot be later than end date.';
   }
 
   // One year, anchored to the milestone's own start date (not to today) —
@@ -251,6 +292,71 @@ const validateTaskDatesWithinMilestone = (taskStartInput, taskDueInput, mileston
   return 'Task dates must fall within its milestone\'s own date range.';
 };
 
+/**
+ * Shared by createMilestone and updateMilestoneDetails — a milestone's own
+ * start_date/due_date must fall within its project's overall window
+ * (project_overviews.start_date/end_date), once the group has set one.
+ * Mirrors validateTaskDatesWithinMilestone's same "skip whichever side
+ * isn't set" approach one level up (milestone-within-project rather than
+ * task-within-milestone) — kept as its own separate function rather than
+ * reusing that one, since task validation itself is untouched by this.
+ */
+const validateMilestoneWithinProjectWindow = (milestoneStartInput, milestoneDueInput, projectStartInput, projectEndInput) => {
+  const milestoneStart = parseDateOnly(milestoneStartInput);
+  const milestoneDue = parseDateOnly(milestoneDueInput);
+  const projectStart = parseDateOnly(projectStartInput);
+  const projectEnd = parseDateOnly(projectEndInput);
+
+  const outOfRange =
+    (projectStart && milestoneStart && milestoneStart < projectStart) ||
+    (projectEnd && milestoneDue && milestoneDue > projectEnd) ||
+    (projectEnd && milestoneStart && milestoneStart > projectEnd) ||
+    (projectStart && milestoneDue && milestoneDue < projectStart);
+
+  if (!outOfRange) return null;
+
+  if (projectStart && projectEnd) {
+    return `Milestone dates must fall within the project's ${formatDateForMessage(projectStartInput)} – ${formatDateForMessage(projectEndInput)} window.`;
+  }
+  return "Milestone dates must fall within the project's own window.";
+};
+
+/**
+ * Validates the project's own overall window (project_overviews) on every
+ * save via upsertOverview. Mirrors validateMilestoneDates' same shape
+ * (not-before-today, start<=end, a span cap) one level up — kept as its
+ * own separate function since it has a different cap (two years, not
+ * one) and `enforceNotBeforeToday` means something slightly different
+ * here: "the start date is actually changing from what's already
+ * stored," not "creation only" — upsertOverview always does both create
+ * and edit through the same call, there's no separate action to split on.
+ */
+const validateProjectOverviewDates = (startDateInput, endDateInput, { enforceNotBeforeToday }) => {
+  const start = parseDateOnly(startDateInput);
+  const end = parseDateOnly(endDateInput);
+
+  if (enforceNotBeforeToday && start && start < todayDateOnly()) {
+    return 'Project start date cannot be before today.';
+  }
+
+  if (start && end && end < start) {
+    return 'Project start date cannot be later than end date.';
+  }
+
+  // Two years, anchored to the project's own start date — same pattern as
+  // addOneYear for milestones, just a longer cap for the project as a
+  // whole.
+  if (start && end) {
+    const twoYearsAfterStart = new Date(start);
+    twoYearsAfterStart.setFullYear(twoYearsAfterStart.getFullYear() + 2);
+    if (end > twoYearsAfterStart) {
+      return "A project's end date can't be more than two years after its start date.";
+    }
+  }
+
+  return null;
+};
+
 
 
 
@@ -279,6 +385,22 @@ const createMilestone = async (req, res) => {
     const dateError = validateMilestoneDates(start_date, due_date, { enforceNotBeforeToday: true });
     if (dateError) {
       return res.status(400).json({ success: false, error: dateError });
+    }
+
+    // Only enforced once the group has actually set a project-level
+    // window (see upsertOverview/getOverviewByGroup) — a group that
+    // hasn't isn't blocked from creating milestones at all.
+    const [overviewRows] = await dbPromise.query(
+      'SELECT start_date, end_date FROM project_overviews WHERE group_id = ?',
+      [group_id]
+    );
+    if (overviewRows.length > 0) {
+      const windowError = validateMilestoneWithinProjectWindow(
+        start_date, due_date, overviewRows[0].start_date, overviewRows[0].end_date
+      );
+      if (windowError) {
+        return res.status(400).json({ success: false, error: windowError });
+      }
     }
 
     // Access Control — any group member may create a milestone (only
@@ -461,17 +583,38 @@ const updateMilestoneDetails = async (req, res) => {
       return res.status(400).json({ success: false, error: 'title is required.' });
     }
 
-    // Not-before-today is create-only (see validateMilestoneDates) — an
-    // edit to an older milestone isn't blocked just because its original
-    // start date has since passed. The one-year span cap still applies.
-    const dateError = validateMilestoneDates(start_date, due_date, { enforceNotBeforeToday: false });
+    const [mRows] = await dbPromise.query('SELECT group_id, start_date FROM milestones WHERE id = ?', [id]);
+    if (mRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Milestone not found.' });
+    }
+
+    // Not-before-today only applies when the start date is actually being
+    // changed — an edit that leaves an already-past start date untouched
+    // (e.g. fixing just the title) isn't blocked just because time has
+    // passed since it was first set, but an edit can no longer be used to
+    // move the start date backward into the past. The one-year span cap
+    // still always applies, on both create and edit.
+    const startDateUnchanged =
+      parseDateOnly(start_date) && parseDateOnly(mRows[0].start_date) &&
+      parseDateOnly(start_date).getTime() === parseDateOnly(mRows[0].start_date).getTime();
+    const dateError = validateMilestoneDates(start_date, due_date, { enforceNotBeforeToday: !startDateUnchanged });
     if (dateError) {
       return res.status(400).json({ success: false, error: dateError });
     }
 
-    const [mRows] = await dbPromise.query('SELECT group_id FROM milestones WHERE id = ?', [id]);
-    if (mRows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Milestone not found.' });
+    // Only enforced once the group has actually set a project-level
+    // window — same as createMilestone's equivalent check.
+    const [overviewRows] = await dbPromise.query(
+      'SELECT start_date, end_date FROM project_overviews WHERE group_id = ?',
+      [mRows[0].group_id]
+    );
+    if (overviewRows.length > 0) {
+      const windowError = validateMilestoneWithinProjectWindow(
+        start_date, due_date, overviewRows[0].start_date, overviewRows[0].end_date
+      );
+      if (windowError) {
+        return res.status(400).json({ success: false, error: windowError });
+      }
     }
 
     if (userRole === 'student') {
@@ -531,8 +674,10 @@ const deleteMilestone = async (req, res) => {
 // SCOPE DIVISION CONTROLLERS
 
 /**
- * GET: List a group's (project-wide) scope sections, with the claimant's
- * name resolved.
+ * GET: List a group's (project-wide) scope sections, with the creator's
+ * name resolved (`claimed_by` — every section has an owner from the moment
+ * it's created, there's no separate claim step any more). Visible to every
+ * group member, unchanged.
  */
 const getScopeSectionsByGroup = async (req, res) => {
   try {
@@ -564,10 +709,16 @@ const getScopeSectionsByGroup = async (req, res) => {
 };
 
 /**
- * POST: Define a new scope section for the whole project (group). Leader-
- * only — the leader defines sections (with supervisor/mentor input
- * gathered elsewhere, e.g. group chat); claiming one is open to any member
- * (see claimScopeSection).
+ * POST: Create a new scope section for the whole project (group) — open to
+ * any group member, not just the leader. Creating a section is the only
+ * step: it sets `claimed_by` to the calling student's own verified id
+ * immediately, in the same insert. There is no separate "claim" action any
+ * more (see Supersedes note in the prompt this replaced — claimScopeSection
+ * has been removed entirely, not just hidden).
+ *
+ * Capped at one section per student per project — a student who already
+ * owns a section here must edit or delete that one rather than create a
+ * second.
  */
 const createScopeSection = async (req, res) => {
   try {
@@ -580,20 +731,29 @@ const createScopeSection = async (req, res) => {
     if (!groupId || !title) {
       return res.status(400).json({ success: false, error: 'groupId and title are required.' });
     }
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User not identified.' });
+    }
 
     if (userRole === 'student') {
-      const [leaderRows] = await dbPromise.query(
-        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
-        [userId, groupId]
+      const isMember = await verifyMembership(userId, userRole, groupId);
+      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
+
+      const [existingOwn] = await dbPromise.query(
+        `SELECT id, title FROM project_scope_sections WHERE group_id = ? AND claimed_by = ?`,
+        [groupId, userId]
       );
-      if (leaderRows.length === 0) {
-        return res.status(403).json({ success: false, error: 'Only the group leader can define scope sections.' });
+      if (existingOwn.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: `You've already created "${existingOwn[0].title}" for this project — you can only own one section per project. Edit that one instead.`,
+        });
       }
     }
 
     const [result] = await dbPromise.query(
-      `INSERT INTO project_scope_sections (group_id, title, description) VALUES (?, ?, ?)`,
-      [groupId, title, description || null]
+      `INSERT INTO project_scope_sections (group_id, title, description, claimed_by) VALUES (?, ?, ?, ?)`,
+      [groupId, title, description || null, userId]
     );
 
     res.status(201).json({ success: true, message: 'Scope section created.', data: { id: result.insertId } });
@@ -604,83 +764,10 @@ const createScopeSection = async (req, res) => {
 };
 
 /**
- * PUT: Claim a scope section. Any group member may claim any still-open
- * section — first to claim locks it. The UPDATE is guarded by
- * `claimed_by IS NULL` so it's a single atomic statement: if two members
- * tick the same section at nearly the same time, only the first UPDATE
- * actually affects a row; the second affects zero rows and gets a 409
- * instead of silently overwriting the first member's claim.
- */
-const claimScopeSection = async (req, res) => {
-  try {
-    await ensureScopeSectionsTable();
-    const { id } = req.params;
-    const userId = req.headers['x-user-id'];
-    const userRole = req.headers['x-user-role'];
-
-    if (!userId) {
-      return res.status(400).json({ success: false, error: 'User not identified.' });
-    }
-
-    const [sRows] = await dbPromise.query(
-      `SELECT id, group_id FROM project_scope_sections WHERE id = ?`,
-      [id]
-    );
-    if (sRows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Scope section not found.' });
-    }
-
-    if (userRole === 'student') {
-      const isMember = await verifyMembership(userId, userRole, sRows[0].group_id);
-      if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
-    }
-
-    // A student may only ever have ONE claimed section for the WHOLE
-    // PROJECT at a time — not one per milestone any more. Reject before
-    // attempting the atomic claim below.
-    const [existingClaim] = await dbPromise.query(
-      `SELECT id, title FROM project_scope_sections WHERE group_id = ? AND claimed_by = ? AND id != ?`,
-      [sRows[0].group_id, userId, id]
-    );
-    if (existingClaim.length > 0) {
-      return res.status(409).json({
-        success: false,
-        error: `You've already claimed "${existingClaim[0].title}" for this project — you can only claim one section for the whole project.`,
-      });
-    }
-
-    const [result] = await dbPromise.query(
-      `UPDATE project_scope_sections SET claimed_by = ?, claimed_at = NOW() WHERE id = ? AND claimed_by IS NULL`,
-      [userId, id]
-    );
-
-    if (result.affectedRows === 0) {
-      const [current] = await dbPromise.query(
-        `SELECT u.name AS claimed_by_name
-         FROM project_scope_sections s
-         LEFT JOIN users u ON u.id = s.claimed_by
-         WHERE s.id = ?`,
-        [id]
-      );
-      const claimerName = current[0]?.claimed_by_name || 'someone else';
-      return res.status(409).json({
-        success: false,
-        error: `This section was already claimed by ${claimerName}.`,
-      });
-    }
-
-    res.status(200).json({ success: true, message: 'Section claimed.' });
-  } catch (error) {
-    console.error('❌ Error claiming scope section:', error);
-    res.status(500).json({ success: false, error: 'Failed to claim scope section.' });
-  }
-};
-
-/**
- * PUT: Edit a scope section's title/description. Leader-only, same
- * restriction as creating one. Editing is allowed regardless of whether the
- * section has already been claimed — only claiming/unclaiming touches
- * claimed_by, this never does.
+ * PUT: Edit a scope section's title/description. Owner-only — only the
+ * student who created this specific section may edit it (no leader
+ * override; creating a section makes it exclusively the creator's). Looked
+ * up fresh at request time, never trusted from the client.
  */
 const updateScopeSection = async (req, res) => {
   try {
@@ -695,21 +782,15 @@ const updateScopeSection = async (req, res) => {
     }
 
     const [sRows] = await dbPromise.query(
-      `SELECT id, group_id FROM project_scope_sections WHERE id = ?`,
+      `SELECT id, group_id, claimed_by FROM project_scope_sections WHERE id = ?`,
       [id]
     );
     if (sRows.length === 0) {
       return res.status(404).json({ success: false, error: 'Scope section not found.' });
     }
 
-    if (userRole === 'student') {
-      const [leaderRows] = await dbPromise.query(
-        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
-        [userId, sRows[0].group_id]
-      );
-      if (leaderRows.length === 0) {
-        return res.status(403).json({ success: false, error: 'Only the group leader can edit scope sections.' });
-      }
+    if (userRole === 'student' && String(sRows[0].claimed_by) !== String(userId)) {
+      return res.status(403).json({ success: false, error: 'You can only edit a scope section you created yourself.' });
     }
 
     await dbPromise.query(
@@ -725,8 +806,8 @@ const updateScopeSection = async (req, res) => {
 };
 
 /**
- * DELETE: Remove a scope section entirely. Leader-only, same restriction as
- * creating one.
+ * DELETE: Remove a scope section entirely. Same owner-only rule as editing
+ * — no leader override.
  */
 const deleteScopeSection = async (req, res) => {
   try {
@@ -736,7 +817,7 @@ const deleteScopeSection = async (req, res) => {
     const userRole = req.headers['x-user-role'];
 
     const [sRows] = await dbPromise.query(
-      `SELECT id, group_id FROM project_scope_sections WHERE id = ?`,
+      `SELECT id, group_id, claimed_by FROM project_scope_sections WHERE id = ?`,
       [id]
     );
     if (sRows.length === 0) {
@@ -744,12 +825,19 @@ const deleteScopeSection = async (req, res) => {
     }
 
     if (userRole === 'student') {
-      const [leaderRows] = await dbPromise.query(
-        'SELECT 1 FROM project_group_members WHERE student_id = ? AND group_id = ? AND is_leader = 1',
-        [userId, sRows[0].group_id]
-      );
-      if (leaderRows.length === 0) {
-        return res.status(403).json({ success: false, error: 'Only the group leader can delete scope sections.' });
+      const isOwner = String(sRows[0].claimed_by) === String(userId);
+      // An orphaned section (claimed_by NULL, or referencing an account
+      // that no longer exists) has no owner to ever delete it under the
+      // owner-only rule above — left over from before every section
+      // always got an owner at creation. Any group member may clear one
+      // of these out, rather than leaving it permanently stuck.
+      const isOrphaned = sRows[0].claimed_by == null;
+      if (!isOwner && !isOrphaned) {
+        return res.status(403).json({ success: false, error: 'You can only delete a scope section you created yourself.' });
+      }
+      if (!isOwner) {
+        const isMember = await verifyMembership(userId, userRole, sRows[0].group_id);
+        if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
       }
     }
 
@@ -875,12 +963,13 @@ const getTasksByMilestone = async (req, res) => {
       if (!isMember) return res.status(403).json({ success: false, error: 'Access denied.' });
     }
  // Join with milestones and tasks to show which phase the task belongs to
-      `SELECT t.*, u.name AS assigned_to_name 
+    const [tasks] = await dbPromise.query(
+      `SELECT t.*, u.name AS assigned_to_name
        FROM student_tasks t
        LEFT JOIN users u ON t.assigned_to = u.id
        WHERE t.milestone_id = ? ORDER BY t.created_at ASC`,
       [milestoneId]
-    ;
+    );
 
     res.status(200).json({ success: true, data: tasks });
   } catch (error) {
@@ -896,6 +985,7 @@ const getTasksByMilestone = async (req, res) => {
 const getTasksByStudent = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureTaskFileColumns();
     const { studentId } = req.params;
     const authUserId = req.headers['x-user-id'];
 
@@ -944,13 +1034,14 @@ const getTasksByStudent = async (req, res) => {
 const getTasksByStudentAndGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
+    await ensureTaskFileColumns();
     const { studentId, groupId } = req.params;
 
     console.log(`📡 [Backend] Fetching tasks for Student: ${studentId}, Group: ${groupId}`);
 
     const [tasks] = await dbPromise.query(
       `SELECT t.id, t.milestone_id, t.assigned_to, t.task_name, t.description,
-              t.status, t.due_date, t.created_at,
+              t.status, t.due_date, t.created_at, t.file_name, t.file_url,
               m.title AS milestone_title, m.group_id AS group_id,
               u.name AS assigned_to_name
        FROM student_tasks t
@@ -978,6 +1069,7 @@ const getTasksByGroup = async (req, res) => {
   try {
     await ensureMilestoneTables();
     await ensureCompletedAtColumn();
+    await ensureTaskFileColumns();
     const { groupId } = req.params;
     const userId = req.headers['x-user-id'];
     const userRole = req.headers['x-user-role'];
@@ -994,6 +1086,7 @@ const getTasksByGroup = async (req, res) => {
       `SELECT t.id AS id, t.milestone_id AS milestone_id, t.assigned_to AS assigned_to,
               t.task_name AS task_name, t.description AS description, t.status AS status,
               t.due_date AS due_date, t.created_at AS created_at, t.completed_at AS completed_at,
+              t.file_name AS file_name, t.file_url AS file_url,
               u.name AS assigned_to_name, m.title AS milestone_title
        FROM student_tasks t
        JOIN milestones m ON t.milestone_id = m.id
@@ -1090,6 +1183,66 @@ const deleteTask = async (req, res) => {
   }
 };
 
+/**
+ * POST: Attach one file to an already-created task — uploaded to
+ * Cloudinary the exact same way Project Stage files (uploadStageFile,
+ * projectController.js) and group Submissions (submissionController.js)
+ * already are, via the shared upload.single('file') middleware and
+ * uploadBufferToCloudinary helper. Its own dedicated Cloudinary folder
+ * (CLOUDINARY_TASK_FOLDER, default 'task-attachments') keeps these from
+ * ever mixing in with Stage files or Submissions. Optional and
+ * creation-time-only for now — called right after a successful task
+ * create (see MilestoneProgressBoard.tsx's quick-add form); there's no
+ * "edit a task" endpoint yet to attach one later.
+ */
+const uploadTaskFile = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file provided' });
+    }
+
+    const { task_id } = req.body;
+    if (!task_id) {
+      return res.status(400).json({ success: false, error: 'task_id is required' });
+    }
+
+    await ensureMilestoneTables();
+    await ensureTaskFileColumns();
+
+    const userId = req.headers['x-user-id'];
+    const userRole = req.headers['x-user-role'];
+
+    // Access Control: a student may only attach a file to their own
+    // task — same self-only rule updateTaskStatus/deleteTask enforce.
+    const [taskRows] = await dbPromise.query('SELECT assigned_to FROM student_tasks WHERE id = ?', [task_id]);
+    if (taskRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Task not found.' });
+    }
+    if (userRole === 'student' && String(taskRows[0].assigned_to) !== String(userId)) {
+      return res.status(403).json({ success: false, error: 'You can only attach a file to your own task.' });
+    }
+
+    const cloudFolder = process.env.CLOUDINARY_TASK_FOLDER || 'task-attachments';
+    const cloudResult = await uploadBufferToCloudinary(req.file.buffer, req.file.originalname, cloudFolder);
+    const fileUrl = cloudResult.secure_url || cloudResult.url
+      || (cloudResult.public_id ? cloudinary.url(cloudResult.public_id, { resource_type: 'auto' }) : null);
+
+    if (!fileUrl) {
+      throw new Error('Cloudinary upload succeeded but no URL was returned');
+    }
+
+    await dbPromise.query(
+      `UPDATE student_tasks SET file_name = ?, file_url = ? WHERE id = ?`,
+      [req.file.originalname, fileUrl, task_id]
+    );
+
+    res.status(200).json({ success: true, file_name: req.file.originalname, file_url: fileUrl });
+  } catch (error) {
+    console.error('❌ Error uploading task file:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to upload task file.' });
+  }
+};
+
   
 
 
@@ -1111,6 +1264,24 @@ const upsertOverview = async (req, res) => {
 
     if (!group_id) {
       return res.status(400).json({ success: false, error: 'group_id is required.' });
+    }
+
+    // Not-before-today only applies when the start date is actually being
+    // changed from what's already stored — same "changed value" exemption
+    // milestones use, adapted for the fact this is always a single upsert
+    // (no separate create/edit action to distinguish here).
+    const [existingRows] = await dbPromise.query(
+      'SELECT start_date FROM project_overviews WHERE group_id = ?',
+      [group_id]
+    );
+    const startDateUnchanged =
+      existingRows.length > 0 &&
+      parseDateOnly(start_date) && parseDateOnly(existingRows[0].start_date) &&
+      parseDateOnly(start_date).getTime() === parseDateOnly(existingRows[0].start_date).getTime();
+
+    const dateError = validateProjectOverviewDates(start_date, end_date, { enforceNotBeforeToday: !startDateUnchanged });
+    if (dateError) {
+      return res.status(400).json({ success: false, error: dateError });
     }
 
     // Access Control
@@ -1185,11 +1356,11 @@ module.exports = {
   getTasksByGroup,
   updateTaskStatus,
   deleteTask,
+  uploadTaskFile,
   upsertOverview,
   getOverviewByGroup,
   getScopeSectionsByGroup,
   createScopeSection,
-  claimScopeSection,
   updateScopeSection,
   deleteScopeSection
 };
