@@ -322,6 +322,39 @@ const getStudentSummary = async (req, res) => {
       LIMIT 4
     `;
 
+    // The student's own active group — students can only ever belong to one
+    // live group at a time (see groupController.js's already-grouped-member
+    // checks), so there's no real "which project" ambiguity to resolve here.
+    // Ordered the same way recentProjectsQuery above is, so if a stale extra
+    // group row ever exists the summary cards below stay scoped to the same
+    // project "Recent Projects" surfaces first. Resolved BEFORE
+    // upcomingDeadlinesQuery below, which needs this group's level to scope
+    // its "Project Stage" half.
+    const activeGroupQuery = `
+      SELECT pg.id AS groupId, pg.level AS groupLevel
+      FROM project_groups pg
+      JOIN project_group_members gm ON gm.group_id = pg.id
+      LEFT JOIN (
+        SELECT group_id, MAX(created_at) AS last_activity
+        FROM marks WHERE mark_type = 'stage' GROUP BY group_id
+      ) progress ON progress.group_id = pg.id
+      WHERE gm.student_id = ?
+      ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
+      LIMIT 1
+    `;
+
+    const [activeGroupRows] = await db.promise().query(activeGroupQuery, [studentId]);
+    const activeGroupLevelForDeadlines = activeGroupRows?.[0]?.groupLevel ?? null;
+
+    // project_stages is a shared per-level TEMPLATE (every group at a level
+    // works toward the same stage deadlines) — it previously had no `level`
+    // filter at all, so this "Upcoming Panels" card on the student dashboard
+    // showed the exact same Interim/Final deadlines to literally every
+    // student system-wide, including one with no group (and therefore no
+    // project stage to work toward) yet. `ps.level = ?` with
+    // activeGroupLevelForDeadlines as NULL when the student has no group
+    // correctly matches zero rows (MySQL never matches `= NULL`), so a
+    // groupless student now sees no stage deadlines here either.
     const upcomingDeadlinesQuery = `
       (
         SELECT
@@ -335,6 +368,7 @@ const getStudentSummary = async (req, res) => {
         FROM project_stages ps
         WHERE ps.deadline IS NOT NULL
           AND ps.deadline >= CURDATE()
+          AND ps.level = ?
       )
       UNION ALL
       (
@@ -357,33 +391,12 @@ const getStudentSummary = async (req, res) => {
       LIMIT 5
     `;
 
-    // The student's own active group — students can only ever belong to one
-    // live group at a time (see groupController.js's already-grouped-member
-    // checks), so there's no real "which project" ambiguity to resolve here.
-    // Ordered the same way recentProjectsQuery above is, so if a stale extra
-    // group row ever exists the summary cards below stay scoped to the same
-    // project "Recent Projects" surfaces first.
-    const activeGroupQuery = `
-      SELECT pg.id AS groupId
-      FROM project_groups pg
-      JOIN project_group_members gm ON gm.group_id = pg.id
-      LEFT JOIN (
-        SELECT group_id, MAX(created_at) AS last_activity
-        FROM marks WHERE mark_type = 'stage' GROUP BY group_id
-      ) progress ON progress.group_id = pg.id
-      WHERE gm.student_id = ?
-      ORDER BY COALESCE(progress.last_activity, pg.created_at) DESC
-      LIMIT 1
-    `;
-
     const [
       [recentProjectsRows],
       [upcomingDeadlinesRows],
-      [activeGroupRows],
     ] = await Promise.all([
       db.promise().query(recentProjectsQuery, [studentId]),
-      db.promise().query(upcomingDeadlinesQuery, [studentId]),
-      db.promise().query(activeGroupQuery, [studentId]),
+      db.promise().query(upcomingDeadlinesQuery, [activeGroupLevelForDeadlines, studentId]),
     ]);
 
     const recentProjects = Array.isArray(recentProjectsRows)

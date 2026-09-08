@@ -53,7 +53,7 @@ const getStudentGroupScope = async (studentId) => {
     if (!studentId) return null;
     try {
         const [rows] = await dbPromise.query(
-            `SELECT pg.group_name, pg.level
+            `SELECT pg.group_name, pg.level, pg.department
              FROM project_group_members gm
              JOIN project_groups pg ON pg.id = gm.group_id
              WHERE gm.student_id = ?
@@ -65,6 +65,7 @@ const getStudentGroupScope = async (studentId) => {
         return {
             groupName: rows[0].group_name,
             level: rows[0].level != null ? Number(rows[0].level) : null,
+            department: normalizeAcademicUnit(rows[0].department),
         };
     } catch (error) {
         console.warn('getStudentGroupScope lookup failed:', error.message);
@@ -292,8 +293,29 @@ const getUpcomingPanels = async (req, res) => {
         const studentGroupScope = studentId ? await getStudentGroupScope(studentId) : null;
         const studentGroupName = studentGroupScope ? studentGroupScope.groupName : null;
 
+        // A student with no resolvable group (not in project_group_members
+        // yet, or the lookup itself failed) must see NO panels, not every
+        // panel system-wide. Below, `studentGroupName`/`level`/`department`
+        // all being null makes every "(? IS NULL OR ...)" clause pass
+        // through unfiltered — that's the intended fallback for a
+        // coordinator with no scope (see the coordinatorId branch, which
+        // deliberately returns everything when no id is given), but a
+        // studentId was given here and simply couldn't be resolved to a
+        // group, so the safe default is the opposite: show nothing rather
+        // than silently handing back every other group's panels too.
+        if (studentId && !studentGroupScope) {
+            return res.status(200).json([]);
+        }
+
         const scope = studentId ? null : await getCoordinatorScope(coordinatorId);
-        const department = scope ? scope.department : null;
+        // Department wasn't previously checked for a student at all (only
+        // level + exact group-name match) — harmless while every group name
+        // in the system happens to be unique, but two different departments
+        // are free to reuse the same group name at the same level, and a
+        // name-only match would then hand a student panels that belong to a
+        // same-named group in a different department. Scoping by the
+        // student's own group's department too closes that gap.
+        const department = studentGroupScope ? studentGroupScope.department : (scope ? scope.department : null);
         const level = studentGroupScope ? studentGroupScope.level : (scope ? scope.level : null);
 
         const query = `
