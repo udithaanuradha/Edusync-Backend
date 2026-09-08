@@ -128,12 +128,36 @@ app.post("/api/login", (req, res) => {
 
 app.post('/api/signup', async (req, res) => {
   // Expect frontend to send firstName and lastName individually
-  let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
+  let { firstName, lastName, email, password, role, university_id, phone, academic_unit, access_key, accessKey } = req.body;
+  const cleanAccessKey = String(access_key || accessKey || '').trim();
 
   // Basic backend-side validation using central validator
-  const validationResult = validateUserCreation({ firstName, lastName, email, phone, password, role, universityId: university_id, department: academic_unit });
+  const validationResult = validateUserCreation({ 
+    firstName, 
+    lastName, 
+    email, 
+    phone, 
+    password, 
+    role, 
+    universityId: university_id, 
+    department: academic_unit,
+    accessKey: cleanAccessKey
+  });
   if (!validationResult.valid) {
     return res.status(400).json({ error: 'Validation failed', details: validationResult.errors, message: validationResult.errors[0] });
+  }
+
+  // Strict role-specific key verification for staff accounts (Read strictly from environment variables)
+  if (role === 'lecturer') {
+    const expectedLecturerKey = process.env.LECTURER_SECURITY_KEY;
+    if (!expectedLecturerKey || cleanAccessKey !== expectedLecturerKey) {
+      return res.status(403).json({ error: 'Invalid Lecturer Key. Access denied.' });
+    }
+  } else if (role === 'admin') {
+    const expectedAdminKey = process.env.ADMIN_SECURITY_KEY;
+    if (!expectedAdminKey || cleanAccessKey !== expectedAdminKey) {
+      return res.status(403).json({ error: 'Invalid Admin Key. Access denied.' });
+    }
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -523,6 +547,9 @@ app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
+
+const awarenessSessionRoutes = require("./src/routes/awarenessSessionRoutes");
+app.use("/api/awareness-sessions", awarenessSessionRoutes);
 
 const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
 app.use("/api/meeting-requests", meetingRequestRoutes);
