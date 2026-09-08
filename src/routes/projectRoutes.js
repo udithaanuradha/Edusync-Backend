@@ -5,7 +5,9 @@ const {
     getStageById,
     createStage,
     deleteStage,
-    updateStage
+    updateStage,
+    deleteStageFile,
+    deleteMarkingCriteria
 } = require('../controllers/projectController');
 const { verifyToken, authorizeRole } = require('../middleware/authMiddleware');
 
@@ -27,6 +29,13 @@ router.put('/update/:id', verifyToken, authorizeRole(['admin', 'instructor', 'fa
 
 // DELETE /api/projects/delete/:id -> delete a stage
 router.delete('/delete/:id', deleteStage);
+
+// DELETE /api/projects/files/:file_id -> remove a single Supporting Document
+// DELETE /api/projects/marking-criteria/:stage_id -> clear a stage's rubric
+// Same protection level as PUT /update/:id (a bearer token is required, and
+// the caller must self-report an allowed user_role in the request body).
+router.delete('/files/:file_id', verifyToken, authorizeRole(['admin', 'instructor', 'faculty', 'coordinator']), deleteStageFile);
+router.delete('/marking-criteria/:stage_id', verifyToken, authorizeRole(['admin', 'instructor', 'faculty', 'coordinator']), deleteMarkingCriteria);
 
 // Note: `POST /api/projects/upload-file` is handled directly in index.js
 // because it requires multer/cloudinary middleware. The `uploadStageFile`

@@ -43,6 +43,31 @@ const ensureStageAcademicUnitColumn = async () => {
     await ensureStageAcademicUnitColumnPromise;
 };
 
+// Same self-heal pattern as ensureStageAcademicUnitColumn above, for the
+// staff-only Marking Criteria rubric path (see migrations/add-marking-criteria-file.sql
+// for the standalone version). A separate column rather than a stage_files
+// row: a stage has at most one rubric, it's coordinator-set metadata on the
+// stage itself, and — critically — it must never surface in the same list
+// the student view reads (stage_files), only through this dedicated column
+// which getStagesByLevel's controller strips for non-staff callers.
+let ensureStageMarkingCriteriaColumnPromise = null;
+const ensureStageMarkingCriteriaColumn = async () => {
+    if (!ensureStageMarkingCriteriaColumnPromise) {
+        ensureStageMarkingCriteriaColumnPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM project_stages');
+                const hasColumn = (columns || []).some((column) => column.Field === 'marking_criteria_file');
+                if (!hasColumn) {
+                    await dbPromise.query(`ALTER TABLE project_stages ADD COLUMN marking_criteria_file TEXT DEFAULT NULL`);
+                }
+            } catch (error) {
+                console.warn('project_stages marking_criteria_file column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureStageMarkingCriteriaColumnPromise;
+};
+
 const getStagesByLevel = (level, coordinatorId, academicUnit, callback) => {
     if (typeof academicUnit === 'function') {
         callback = academicUnit;
@@ -54,7 +79,7 @@ const getStagesByLevel = (level, coordinatorId, academicUnit, callback) => {
         academicUnit = null;
     }
 
-    ensureStageAcademicUnitColumn().then(() => {
+    Promise.all([ensureStageAcademicUnitColumn(), ensureStageMarkingCriteriaColumn()]).then(() => {
     // First get all stages for this level created by this coordinator
     // NOTE: `u.academic_unit` is deliberately left unaliased and placed after
     // `ps.*` so it keeps winning the `academic_unit` key in the result object
@@ -225,7 +250,24 @@ const updateStage = (id, data, callback) => {
 };
 
 const uploadStageFile = (data, callback) => {
-    const { stage_id, file_name, file_url, uploaded_by } = data;
+    const { stage_id, file_name, file_url, uploaded_by, file_category } = data;
+
+    if (file_category === 'marking_criteria') {
+        // Staff-only rubric: overwrite the single column on the stage
+        // itself. Deliberately NOT inserted into stage_files — that table
+        // backs the Supporting Documents list the student view also reads
+        // from (see stage_files SELECT in getStagesByLevel above), and a
+        // rubric must never end up there.
+        ensureStageMarkingCriteriaColumn().then(() => {
+            db.query(
+                'UPDATE project_stages SET marking_criteria_file = ? WHERE stage_id = ?',
+                [file_url, stage_id],
+                callback
+            );
+        }).catch((err) => callback(err, null));
+        return;
+    }
+
     db.query(
         'INSERT INTO stage_files (stage_id, file_name, file_url, uploaded_by) VALUES (?, ?, ?, ?)',
         [stage_id, file_name, file_url, uploaded_by],
@@ -233,4 +275,26 @@ const uploadStageFile = (data, callback) => {
     );
 };
 
-module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage, uploadStageFile };
+// DELETE /api/projects/files/:file_id — removes one Supporting Document row.
+const deleteStageFile = (fileId, callback) => {
+    db.query('DELETE FROM stage_files WHERE file_id = ?', [fileId], callback);
+};
+
+// DELETE /api/projects/marking-criteria/:stage_id — clears a stage's rubric
+// so a coordinator can remove or replace one that was uploaded in error.
+const deleteMarkingCriteria = (stageId, callback) => {
+    ensureStageMarkingCriteriaColumn().then(() => {
+        db.query('UPDATE project_stages SET marking_criteria_file = NULL WHERE stage_id = ?', [stageId], callback);
+    }).catch((err) => callback(err, null));
+};
+
+module.exports = {
+    getStagesByLevel,
+    getStageById,
+    createStage,
+    deleteStage,
+    updateStage,
+    uploadStageFile,
+    deleteStageFile,
+    deleteMarkingCriteria,
+};
