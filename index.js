@@ -577,6 +577,9 @@ app.use("/api/announcements", announcementRoutes);
 const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
 app.use("/api/meeting-requests", meetingRequestRoutes);
 
+const meetingReportRoutes = require("./src/routes/meetingReportRoutes");
+app.use("/api/meeting-reports", meetingReportRoutes);
+
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);
 
