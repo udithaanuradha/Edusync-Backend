@@ -159,7 +159,8 @@ const getGroupProgressDetail = async (req, res) => {
 
     const [tasks] = await dbPromise.query(
       `SELECT t.id, t.milestone_id, t.assigned_to, t.task_name, t.description,
-              t.status, t.due_date, t.created_at, u.name AS assigned_to_name
+              t.status, t.due_date, t.created_at, t.file_name, t.file_url,
+              u.name AS assigned_to_name
        FROM student_tasks t
        JOIN milestones m ON t.milestone_id = m.id
        LEFT JOIN users u ON u.id = t.assigned_to
@@ -182,6 +183,8 @@ const getGroupProgressDetail = async (req, res) => {
       status: t.status,
       due_date: t.due_date,
       created_at: t.created_at,
+      file_name: t.file_name,
+      file_url: t.file_url,
     }));
 
     const milestonesWithProgress = milestones.map((m) => {

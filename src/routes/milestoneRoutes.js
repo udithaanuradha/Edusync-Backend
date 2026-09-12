@@ -17,7 +17,7 @@ const {
   deleteTask,
   upsertOverview,
   getOverviewByGroup,
-  getScopeSectionsByMilestone,
+  getScopeSectionsByGroup,
   createScopeSection,
   claimScopeSection,
   updateScopeSection,
@@ -58,13 +58,13 @@ router.delete('/:id', deleteMilestone);
 
 
 
-// SCOPE DIVISION ROUTES
+// SCOPE DIVISION ROUTES — project-wide (per-group), not per-milestone.
 
-// List a milestone's scope sections (with claimant name resolved)
-router.get('/:milestoneId/scope', getScopeSectionsByMilestone);
+// List a group's (whole-project) scope sections (with claimant name resolved)
+router.get('/group/:groupId/scope', getScopeSectionsByGroup);
 
-// Define a new scope section under a milestone (leader-only)
-router.post('/:milestoneId/scope', createScopeSection);
+// Define a new scope section for a group's project (leader-only)
+router.post('/group/:groupId/scope', createScopeSection);
 
 // Claim a still-open scope section — atomic, any group member
 router.put('/scope/:id/claim', claimScopeSection);
