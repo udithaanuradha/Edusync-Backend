@@ -15,6 +15,37 @@ const projectGroupsHasCreatedBy = async () => {
   }
 };
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; same
+// mapping already used by calendarController.js and userController.js).
+const normalizeAcademicUnit = (unit) => {
+  const clean = String(unit || '').trim().toUpperCase();
+  if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+  if (clean === 'CM' || clean === 'AI') return 'AI';
+  if (clean === 'IT') return 'IT';
+  return clean || null;
+};
+
+// Resolves the coordinator's own department + level straight from their own
+// users row, the same way calendarController.js's getCoordinatorScope and
+// userController.js's getStudentsByLevel do — never trusts either value
+// from the client directly.
+const getCoordinatorScope = async (coordinatorId) => {
+  if (!coordinatorId) return null;
+  try {
+    const [rows] = await db.promise().query('SELECT academic_unit, level FROM users WHERE id = ?', [coordinatorId]);
+    if (rows.length === 0) return null;
+    return {
+      department: normalizeAcademicUnit(rows[0].academic_unit),
+      level: rows[0].level != null ? Number(rows[0].level) : null,
+    };
+  } catch (error) {
+    console.warn('getCoordinatorScope lookup failed in dashboard controller:', error.message);
+    return null;
+  }
+};
+
 const getCoordinatorSummary = async (req, res) => {
   try {
     // Extract coordinatorId from query parameters
@@ -34,11 +65,38 @@ const getCoordinatorSummary = async (req, res) => {
       ${projectGroupCoordinatorFilter}
     `;
 
-    const activeStudentsQuery = `
-      SELECT COUNT(*) AS activeStudents
-      FROM users
-      WHERE role = 'student'
-    `;
+    // Previously unscoped ("every student in the whole system, every
+    // department, every level"), so this card showed the exact same number
+    // for every coordinator regardless of who was logged in. Now matched to
+    // the coordinator's own department + level, same as the "add member"
+    // student search (userController.js's getStudentsByLevel) already is —
+    // a coordinator's dashboard should only count the students they could
+    // actually put in one of their own groups.
+    const coordinatorScope = hasCoordinatorFilter ? await getCoordinatorScope(coordinatorId) : null;
+
+    const activeStudentsQuery = coordinatorScope
+      ? `
+        SELECT COUNT(*) AS activeStudents
+        FROM users
+        WHERE role = 'student'
+          AND level = ?
+          AND (? IS NULL OR
+               CASE
+                 WHEN UPPER(TRIM(academic_unit)) IN ('IDS', 'ITM') THEN 'ITM'
+                 WHEN UPPER(TRIM(academic_unit)) IN ('CM', 'AI') THEN 'AI'
+                 WHEN UPPER(TRIM(academic_unit)) = 'IT' THEN 'IT'
+                 ELSE UPPER(TRIM(academic_unit))
+               END = ?)
+      `
+      : `
+        SELECT COUNT(*) AS activeStudents
+        FROM users
+        WHERE role = 'student'
+      `;
+
+    const activeStudentsParams = coordinatorScope
+      ? [coordinatorScope.level, coordinatorScope.department, coordinatorScope.department]
+      : [];
 
     // A panel's evaluation_type ('Proposal'/'Code Review'/...) is matched to
     // project_stages by name WITHIN THE PANEL'S OWN academic_level — the
@@ -100,6 +158,7 @@ const getCoordinatorSummary = async (req, res) => {
         pg.id AS projectId,
         pg.group_name AS groupName,
         COALESCE(u.name, 'Unassigned') AS supervisorName,
+        u2.name AS supervisorName2,
         CASE
           WHEN ${finalStageMarkedSubquery} THEN 'Completed'
           WHEN COALESCE(progress.marked_count, 0) > 0 THEN 'In Progress'
@@ -113,6 +172,7 @@ const getCoordinatorSummary = async (req, res) => {
         COALESCE(progress.last_activity, pg.created_at) AS updatedAt
       FROM project_groups pg
       LEFT JOIN users u ON u.id = pg.supervisor_id
+      LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
       LEFT JOIN (
         SELECT
           m.group_id,
@@ -168,7 +228,7 @@ const getCoordinatorSummary = async (req, res) => {
       [upcomingDeadlinesRows],
     ] = await Promise.all([
       db.promise().query(totalProjectsQuery, totalProjectsParams),
-      db.promise().query(activeStudentsQuery),
+      db.promise().query(activeStudentsQuery, activeStudentsParams),
       db.promise().query(pendingEvaluationsQuery, pendingEvaluationsParams),
       db.promise().query(completedProjectsQuery, completedProjectsParams),
       db.promise().query(recentProjectsQuery, recentProjectsParams),
@@ -187,6 +247,7 @@ const getCoordinatorSummary = async (req, res) => {
           projectId: row.projectId,
           groupName: row.groupName,
           supervisorName: row.supervisorName,
+          supervisorName2: row.supervisorName2 || null,
           status: row.status,
           progress: toNumber(row.progress),
           updatedAt: row.updatedAt,

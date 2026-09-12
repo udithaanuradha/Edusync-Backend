@@ -424,12 +424,34 @@ app.get("/api/projects/files/:stage_id", (req, res) => {
 app.get("/api/admin/stats", (req, res) => {
   db.query(
     `SELECT 
-      (SELECT COUNT(*) FROM users) as totalUsers,
-      (SELECT COUNT(*) FROM users WHERE role = 'student') as totalStudents,
-      (SELECT COUNT(*) FROM users WHERE role = 'coordinator' OR designation = 'coordinator') as totalCoordinators,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR designation = 'supervisor' OR (role = 'lecturer' AND (designation IS NULL OR designation != 'coordinator'))) as totalSupervisors,
-      (SELECT COUNT(*) FROM users WHERE role = 'supervisor' OR role = 'coordinator' OR role = 'lecturer') as totalLecturers,
-      (SELECT COUNT(*) FROM users WHERE role = 'mentor') as totalMentors`,
+      (SELECT COUNT(*) FROM users 
+        WHERE role IS NOT NULL 
+          AND role != 'admin' 
+          AND is_verified = 1 
+          AND (role != 'lecturer' OR designation IS NOT NULL)
+      ) as totalUsers,
+      (SELECT COUNT(*) FROM users 
+        WHERE role = 'student' 
+          AND is_verified = 1
+      ) as totalStudents,
+      (SELECT COUNT(*) FROM users 
+        WHERE is_verified = 1 
+          AND (role = 'coordinator' OR (role = 'lecturer' AND LOWER(TRIM(designation)) = 'coordinator') OR designation = 'coordinator')
+      ) as totalCoordinators,
+      (SELECT COUNT(*) FROM users 
+        WHERE role = 'lecturer' 
+          AND LOWER(TRIM(designation)) = 'supervisor' 
+          AND is_verified = 1
+      ) as totalSupervisors,
+      (SELECT COUNT(*) FROM users 
+        WHERE is_verified = 1 
+          AND role = 'lecturer' 
+          AND designation IS NOT NULL
+      ) as totalLecturers,
+      (SELECT COUNT(*) FROM users 
+        WHERE LOWER(TRIM(role)) IN ('mentor', 'industry mentor') 
+          AND is_verified = 1
+      ) as totalMentors`,
     (err, results) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(results[0]);
@@ -440,8 +462,11 @@ app.get("/api/admin/stats", (req, res) => {
 app.get("/api/admin/recent-logins", (req, res) => {
   const query = `
     SELECT 
+      id,
       name as username, 
+      email,
       role, 
+      designation,
       DATE_FORMAT(CONVERT_TZ(last_login, '+00:00', '+05:30'), '%b %d, %h:%i %p') as time 
     FROM users 
     WHERE last_login IS NOT NULL 
@@ -454,18 +479,68 @@ app.get("/api/admin/recent-logins", (req, res) => {
   });
 });
 
-app.put("/api/admin/promote-students", (req, res) => {
-  db.query(
-    'UPDATE users SET level = level + 1 WHERE role = "student" AND level < 4',
-    (err, result) => {
-      if (err) return res.status(500).json({ error: "Failed to promote students" });
-      res.status(200).json({
-        success: true,
-        message: "Successfully promoted students!",
-        studentsUpdated: result.affectedRows,
+app.put("/api/admin/promote-students", async (req, res) => {
+  try {
+    // Process in descending level order (Level 3 -> 4, Level 2 -> 3, Level 1 -> 2)
+    // to prevent any student from cascading through multiple levels in a single run.
+    const { computeLevelMarksSummary } = require("./src/controllers/marksController");
+    const levelsToPromote = [3, 2, 1];
+    let totalPromoted = 0;
+    const promotionReport = [];
+
+    for (const lvl of levelsToPromote) {
+      // Calculate marks breakdown and overall final percentages for this level
+      const marksSummary = await computeLevelMarksSummary(lvl);
+      const studentData = marksSummary && Array.isArray(marksSummary.data) ? marksSummary.data : [];
+
+      // Academic pass rule: Only promote students with final grade C- or higher.
+      // Canonical grading scale: C- starts at 40.0% (min 40, max 44.99).
+      // Grades below 40 (D: 35-39.99, I: 0-34.99 / unevaluated) do not qualify.
+      const qualifiedStudents = studentData.filter((student) => {
+        const mark = Number(student.final_mark);
+        return Number.isFinite(mark) && mark >= 40.0;
       });
+
+      if (qualifiedStudents.length > 0) {
+        const studentIds = qualifiedStudents.map((s) => s.student_id).filter(Boolean);
+
+        if (studentIds.length > 0) {
+          const [result] = await db.promise().query(
+            'UPDATE users SET level = level + 1 WHERE id IN (?) AND role = "student" AND level = ?',
+            [studentIds, lvl]
+          );
+
+          totalPromoted += result.affectedRows;
+          promotionReport.push({
+            levelFrom: lvl,
+            levelTo: lvl + 1,
+            promotedCount: result.affectedRows,
+            students: qualifiedStudents.map((s) => ({
+              id: s.student_id,
+              name: s.student_name,
+              final_mark: s.final_mark,
+            })),
+          });
+        }
+      }
     }
-  );
+
+    return res.status(200).json({
+      success: true,
+      message: totalPromoted > 0
+        ? `Successfully promoted ${totalPromoted} passed student(s) (Grade C- or higher) to the next level!`
+        : "No students currently qualify for promotion (Grade C- / 40%+ required).",
+      studentsUpdated: totalPromoted,
+      details: promotionReport,
+    });
+  } catch (error) {
+    console.error("Error promoting passed students:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to promote students",
+      message: error.message,
+    });
+  }
 });
 
 // --- 6. Feature Routes ---
@@ -502,12 +577,19 @@ app.use("/api/announcements", announcementRoutes);
 const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
 app.use("/api/meeting-requests", meetingRequestRoutes);
 
+const meetingReportRoutes = require("./src/routes/meetingReportRoutes");
+app.use("/api/meeting-reports", meetingReportRoutes);
+
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);
 
 // Milestones & Tasks (Combined from HEAD)
 const milestoneRoutes = require("./src/routes/milestoneRoutes");
 app.use("/api/milestones", milestoneRoutes);
+
+// Student's Group/Individual project-type choice (Level 3 & 4 toggle)
+const projectTypeRoutes = require("./src/routes/projectTypeRoutes");
+app.use("/api/project-type", projectTypeRoutes);
 
 // Dashboard & Marks (Combined from develop)
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
@@ -565,3 +647,5 @@ try {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// touch 1788028337996

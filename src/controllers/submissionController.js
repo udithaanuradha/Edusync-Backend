@@ -263,12 +263,62 @@ const deleteSubmission = (req, res) => {
   });
 };
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; see
+// groupController.js's getCoordinatorApprovedRequests and
+// marksController.js's normalizeAcademicUnit for the same mapping).
+const normalizeAcademicUnit = (unit) => {
+  const clean = String(unit || '').trim().toUpperCase();
+  if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+  if (clean === 'CM' || clean === 'AI') return 'AI';
+  if (clean === 'IT') return 'IT';
+  return clean || null;
+};
+
+// Resolves both the department AND the level a coordinatorId is actually
+// assigned to, straight from their own users row — never trusts either
+// value from the client directly. Returns null (no restriction) if the id
+// is missing/unknown. App.tsx lets a coordinator browse any
+// /dashboard/level-N page now — this is the actual access boundary.
+const getCoordinatorScope = async (coordinatorId) => {
+  if (!coordinatorId) return null;
+  try {
+    const [rows] = await db.promise().query(
+      'SELECT academic_unit, level FROM users WHERE id = ?',
+      [coordinatorId],
+    );
+    if (rows.length === 0) return null;
+    return {
+      department: normalizeAcademicUnit(rows[0].academic_unit),
+      level: rows[0].level != null ? Number(rows[0].level) : null,
+    };
+  } catch (error) {
+    console.warn('getCoordinatorScope lookup failed:', error.message);
+    return null;
+  }
+};
+
+// Optional ?coordinatorId= scopes the response to just that coordinator's
+// own department AND level (resolved server-side above), so a coordinator
+// from one department can no longer see every other department's
+// submissions, and requesting a level that isn't their own returns nothing
+// rather than their department's data at the wrong level.
 const getCoordinatorSubmissionsByLevel = async (req, res) => {
   const level = Number(req.params.level ?? req.query.level ?? 0);
 
   if (!level) {
     return res.status(400).json({ success: false, message: 'A valid level is required.' });
   }
+
+  const coordinatorId = req.query.coordinatorId || null;
+  const scope = await getCoordinatorScope(coordinatorId);
+
+  if (scope && scope.level != null && scope.level !== level) {
+    return res.json({ success: true, data: [] });
+  }
+
+  const department = scope ? scope.department : null;
 
   const sql = `
     SELECT
@@ -296,10 +346,17 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
     LEFT JOIN project_group_members pgm ON pgm.student_id = ss.student_id
     LEFT JOIN project_groups pg ON pg.id = pgm.group_id AND pg.level = ps.level
     WHERE ps.level = ?
+      AND (? IS NULL OR
+           CASE
+             WHEN UPPER(TRIM(pg.department)) IN ('IDS', 'ITM') THEN 'ITM'
+             WHEN UPPER(TRIM(pg.department)) IN ('CM', 'AI') THEN 'AI'
+             WHEN UPPER(TRIM(pg.department)) = 'IT' THEN 'IT'
+             ELSE UPPER(TRIM(pg.department))
+           END = ?)
     ORDER BY ss.submitted_at DESC
   `;
 
-  db.query(sql, [level], (err, results) => {
+  db.query(sql, [level, department, department], (err, results) => {
     if (err) {
       console.error('Coordinator submissions fetch failed:', err.message);
       return res.status(500).json({ success: false, message: 'Unable to fetch submissions for this level.', error: err.message });

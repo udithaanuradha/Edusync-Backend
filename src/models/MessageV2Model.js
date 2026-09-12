@@ -186,6 +186,44 @@ class MessageV2Model {
     const permitted = await Promise.all(rows.map((r) => canMessage(currentUserId, r.id)));
     return rows.filter((_, idx) => permitted[idx]);
   }
+
+  static async getTotalUnreadCount(userId) {
+    const connection = db.promise ? db.promise() : db;
+
+    // 1:1 direct unread messages
+    const [directRows] = await connection.query(
+      `SELECT COUNT(*) AS count 
+       FROM messages_v2 
+       WHERE receiver_id = ? AND read_status = FALSE AND group_conversation_id IS NULL`,
+      [userId]
+    );
+    const directUnread = Number(directRows[0]?.count || 0);
+
+    // Group unread messages
+    let groupUnread = 0;
+    try {
+      const [groupRows] = await connection.query(
+        `SELECT COUNT(*) AS count
+         FROM messages_v2 m
+         JOIN group_conversation_members gcm ON m.group_conversation_id = gcm.group_conversation_id AND gcm.user_id = ?
+         WHERE m.sender_id != ?
+           AND NOT EXISTS (
+             SELECT 1 FROM message_reads mr WHERE mr.message_id = m.id AND mr.user_id = ?
+           )`,
+        [userId, userId, userId]
+      );
+      groupUnread = Number(groupRows[0]?.count || 0);
+    } catch (err) {
+      groupUnread = 0;
+    }
+
+    return {
+      direct_unread: directUnread,
+      group_unread: groupUnread,
+      total_unread: directUnread + groupUnread,
+    };
+  }
+
 }
 
 module.exports = MessageV2Model;

@@ -83,6 +83,21 @@ class MessageV2Controller {
       return res.status(500).json({ error: 'Failed to fetch recipients' });
     }
   }
+
+  static async getUnreadTotal(req, res) {
+    try {
+      const userId = req.user?.id || req.query.user_id;
+      if (!userId) {
+        return res.status(400).json({ error: 'User ID is required' });
+      }
+      const counts = await MessageV2Model.getTotalUnreadCount(userId);
+      return res.status(200).json({ success: true, ...counts });
+    } catch (error) {
+      console.error('[MessageV2Controller] getUnreadTotal error:', error);
+      return res.status(500).json({ error: 'Failed to fetch unread total' });
+    }
+  }
+
 }
 
 module.exports = MessageV2Controller;
