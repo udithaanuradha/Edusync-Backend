@@ -128,12 +128,36 @@ app.post("/api/login", (req, res) => {
 
 app.post('/api/signup', async (req, res) => {
   // Expect frontend to send firstName and lastName individually
-  let { firstName, lastName, email, password, role, university_id, phone, academic_unit } = req.body;
+  let { firstName, lastName, email, password, role, university_id, phone, academic_unit, access_key, accessKey } = req.body;
+  const cleanAccessKey = String(access_key || accessKey || '').trim();
 
   // Basic backend-side validation using central validator
-  const validationResult = validateUserCreation({ firstName, lastName, email, phone, password, role, universityId: university_id, department: academic_unit });
+  const validationResult = validateUserCreation({ 
+    firstName, 
+    lastName, 
+    email, 
+    phone, 
+    password, 
+    role, 
+    universityId: university_id, 
+    department: academic_unit,
+    accessKey: cleanAccessKey
+  });
   if (!validationResult.valid) {
     return res.status(400).json({ error: 'Validation failed', details: validationResult.errors, message: validationResult.errors[0] });
+  }
+
+  // Strict role-specific key verification for staff accounts (Read strictly from environment variables)
+  if (role === 'lecturer') {
+    const expectedLecturerKey = process.env.LECTURER_SECURITY_KEY;
+    if (!expectedLecturerKey || cleanAccessKey !== expectedLecturerKey) {
+      return res.status(403).json({ error: 'Invalid Lecturer Key. Access denied.' });
+    }
+  } else if (role === 'admin') {
+    const expectedAdminKey = process.env.ADMIN_SECURITY_KEY;
+    if (!expectedAdminKey || cleanAccessKey !== expectedAdminKey) {
+      return res.status(403).json({ error: 'Invalid Admin Key. Access denied.' });
+    }
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -479,18 +503,68 @@ app.get("/api/admin/recent-logins", (req, res) => {
   });
 });
 
-app.put("/api/admin/promote-students", (req, res) => {
-  db.query(
-    'UPDATE users SET level = level + 1 WHERE role = "student" AND level < 4',
-    (err, result) => {
-      if (err) return res.status(500).json({ error: "Failed to promote students" });
-      res.status(200).json({
-        success: true,
-        message: "Successfully promoted students!",
-        studentsUpdated: result.affectedRows,
+app.put("/api/admin/promote-students", async (req, res) => {
+  try {
+    // Process in descending level order (Level 3 -> 4, Level 2 -> 3, Level 1 -> 2)
+    // to prevent any student from cascading through multiple levels in a single run.
+    const { computeLevelMarksSummary } = require("./src/controllers/marksController");
+    const levelsToPromote = [3, 2, 1];
+    let totalPromoted = 0;
+    const promotionReport = [];
+
+    for (const lvl of levelsToPromote) {
+      // Calculate marks breakdown and overall final percentages for this level
+      const marksSummary = await computeLevelMarksSummary(lvl);
+      const studentData = marksSummary && Array.isArray(marksSummary.data) ? marksSummary.data : [];
+
+      // Academic pass rule: Only promote students with final grade C- or higher.
+      // Canonical grading scale: C- starts at 40.0% (min 40, max 44.99).
+      // Grades below 40 (D: 35-39.99, I: 0-34.99 / unevaluated) do not qualify.
+      const qualifiedStudents = studentData.filter((student) => {
+        const mark = Number(student.final_mark);
+        return Number.isFinite(mark) && mark >= 40.0;
       });
+
+      if (qualifiedStudents.length > 0) {
+        const studentIds = qualifiedStudents.map((s) => s.student_id).filter(Boolean);
+
+        if (studentIds.length > 0) {
+          const [result] = await db.promise().query(
+            'UPDATE users SET level = level + 1 WHERE id IN (?) AND role = "student" AND level = ?',
+            [studentIds, lvl]
+          );
+
+          totalPromoted += result.affectedRows;
+          promotionReport.push({
+            levelFrom: lvl,
+            levelTo: lvl + 1,
+            promotedCount: result.affectedRows,
+            students: qualifiedStudents.map((s) => ({
+              id: s.student_id,
+              name: s.student_name,
+              final_mark: s.final_mark,
+            })),
+          });
+        }
+      }
     }
-  );
+
+    return res.status(200).json({
+      success: true,
+      message: totalPromoted > 0
+        ? `Successfully promoted ${totalPromoted} passed student(s) (Grade C- or higher) to the next level!`
+        : "No students currently qualify for promotion (Grade C- / 40%+ required).",
+      studentsUpdated: totalPromoted,
+      details: promotionReport,
+    });
+  } catch (error) {
+    console.error("Error promoting passed students:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to promote students",
+      message: error.message,
+    });
+  }
 });
 
 // --- 6. Feature Routes ---
@@ -524,8 +598,14 @@ app.use("/api/supervisor-tasks", supervisorTaskRoutes);
 const announcementRoutes = require("./src/routes/announcementRoutes");
 app.use("/api/announcements", announcementRoutes);
 
+const awarenessSessionRoutes = require("./src/routes/awarenessSessionRoutes");
+app.use("/api/awareness-sessions", awarenessSessionRoutes);
+
 const meetingRequestRoutes = require("./src/routes/meetingRequestRoutes");
 app.use("/api/meeting-requests", meetingRequestRoutes);
+
+const meetingReportRoutes = require("./src/routes/meetingReportRoutes");
+app.use("/api/meeting-reports", meetingReportRoutes);
 
 const submissionRoutes = require("./src/routes/submissionRoutes");
 app.use("/api/submissions", submissionRoutes);

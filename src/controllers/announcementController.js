@@ -89,22 +89,11 @@ const createAnnouncement = (req, res) => {
     req.body.posted_by,
     req.body.postedBy
   ) || 'System';
-  
-  // The coordinator form sends `coordinator_id` and the supervisor form sends
-  // `supervisor_id` (not `author_id`) — both were silently ignored before,
-  // so every coordinator/supervisor announcement was saved with
-  // author_id = NULL. Accept them as a fallback; `author_id` (what
-  // AdminAnnouncements.tsx already sends) still wins whenever it's present,
-  // so nothing already working changes.
   const authorId = req.body.author_id
     || req.body.coordinator_id
     || req.body.supervisor_id
     || req.user?.id
     || null;
-
-  // Coordinator/supervisor forms send `priority` ('normal' | 'urgent');
-  // accept a couple of aliases defensively and fall back to 'normal' for
-  // anything else, matching what AnnouncementWidget.tsx's getPriority reads.
   const priority = normalizePriority(
     req.body.priority ?? req.body.priority_level ?? req.body.urgency
   );
@@ -126,26 +115,22 @@ const createAnnouncement = (req, res) => {
     )
   `;
 
-  db.query(createTableQuery, async (err) => {
+  db.query(createTableQuery, (err) => {
     if (err && err.code !== 'ER_TABLE_EXISTS_ERROR') {
       console.error('Table creation error:', err);
       return res.status(500).json({ error: 'Database setup failed' });
     }
 
-    await ensureAnnouncementPriorityColumn();
-    await ensureAnnouncementAudienceWidth();
-
     const normalizedAudience = String(targetAudience).trim();
     const normalizedAuthor = String(authorName).trim();
-
     const insertQuery = `
       INSERT INTO announcements (title, message, target_audience, author_name, author_id, priority)
       VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(insertQuery, [title, message, normalizedAudience, normalizedAuthor, authorId, priority], (err, result) => {
-      if (err) {
-        console.error('Insert error:', err);
+    db.query(insertQuery, [title, message, normalizedAudience, normalizedAuthor, authorId, priority], (insertErr, result) => {
+      if (insertErr) {
+        console.error('Insert error:', insertErr);
         return res.status(500).json({ error: 'Database failure' });
       }
 
@@ -167,14 +152,17 @@ const createAnnouncement = (req, res) => {
 };
 
 /**
- * READ: Fetch with enhanced Role-Based Filtering
+ * READ: Fetch with enhanced Role-Based and Department-Based Filtering
  */
 const getAnnouncements = (req, res) => {
-  const userRole = firstNonEmptyString(req.query.role, req.query.userRole, req.query.audience);
-  const userLevel = firstNonEmptyString(req.query.level, req.query.userLevel);
+  let userRole = firstNonEmptyString(req.query.role, req.query.userRole, req.query.audience);
+  let userDesignation = firstNonEmptyString(req.query.designation, req.query.userDesignation);
+  let userLevel = firstNonEmptyString(req.query.level, req.query.userLevel);
+  let userDepartment = firstNonEmptyString(req.query.department, req.query.academic_unit, req.query.academicUnit);
   const authorName = firstNonEmptyString(req.query.author, req.query.author_name, req.query.authorName);
   const allAudienceOnly = req.query.all_audience === 'true';
   const currentUserId = req.query.exclude_author_id ? parseInt(req.query.exclude_author_id, 10) : null;
+  const targetUserId = req.query.user_id ? parseInt(req.query.user_id, 10) : null;
 
   const createTableQuery = `
     CREATE TABLE IF NOT EXISTS announcements (
@@ -198,80 +186,240 @@ const getAnnouncements = (req, res) => {
     await ensureAnnouncementPriorityColumn();
     await ensureAnnouncementAudienceWidth();
 
-    let whereConditions = [];
-    let params = [];
+    const executeQuery = (resolvedRole, resolvedDesignation, resolvedLevel, resolvedDept) => {
+      const roleNorm = normalizeAudience(resolvedRole);
+      const designationNorm = normalizeAudience(resolvedDesignation);
 
-    // 1. Fetch all announcements for management page (all_audience=true)
-    if (allAudienceOnly) {
-      // no filter
-    }
-    // 2. Fetch announcements by author name
-    else if (authorName) {
-      whereConditions.push('author_name = ?');
-      params.push(authorName);
-    }
-    // 3. ADMIN: Sees only announcements specifically targeted to Admins or All System Users
-    else if (userRole && userRole.toLowerCase() === 'admin') {
-      whereConditions.push(`(LOWER(TRIM(target_audience)) IN ('all', 'all system users', 'admin', 'admins', 'administrator', 'administrators') OR LOWER(target_audience) LIKE ?)`);
-      params.push('%admin%');
-    }
-    // 4. COORDINATOR: Uses "Rule of Relevance"
-    else if (userRole && userRole.toLowerCase() === 'coordinator') {
-      whereConditions.push(`(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?)`);
-      params.push('%coordinator%');
-    }
-    // 5. EVERYONE ELSE (Students, Supervisors, Mentors, etc.)
-    else if (userRole) {
-      const normalizedRole = normalizeAudience(userRole);
-      let roleCondition = `(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
-      params.push(`%${normalizedRole}%`);
+      // A user is a Coordinator if role or designation is 'coordinator'
+      const isCoordinator = roleNorm === 'coordinator' || designationNorm === 'coordinator';
 
-      if (userLevel) {
-        roleCondition += ` OR LOWER(target_audience) LIKE ?`;
-        params.push(`%level${userLevel}%`);
+      // A user is a Supervisor if they are not a coordinator and are a lecturer/supervisor
+      // (in the users table, lecturers who aren't assigned as coordinator are supervisors)
+      const isSupervisor = !isCoordinator && (
+        roleNorm === 'supervisor' ||
+        designationNorm === 'supervisor' ||
+        roleNorm === 'lecturer'
+      );
+
+      const isAdmin = roleNorm === 'admin';
+
+      let whereConditions = [];
+      let params = [];
+
+      // 1. Fetch all announcements for management page (all_audience=true) only when not admin
+      if (allAudienceOnly && !isAdmin) {
+        // no filter
       }
-      
-      roleCondition += `)`;
-      whereConditions.push(roleCondition);
-    }
-    // 6. Fallback: No valid parameters provided
-    else {
-      whereConditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
-    }
+      // 2. Fetch announcements by author name (when not admin filtering)
+      else if (authorName && !isAdmin) {
+        whereConditions.push('author_name = ?');
+        params.push(authorName);
+      }
+      // 3. ADMIN: Sees:
+      //    (a) Announcements created by this admin (author_id = targetUserId or author_name = authorName)
+      //    (b) Announcements specifically targeted to Admins (contains 'admin')
+      //    (c) Announcements targeted to All System Users / All
+      else if (isAdmin) {
+        let adminClauses = [
+          "LOWER(TRIM(target_audience)) IN ('all', 'all system users', 'admin', 'admins', 'administrator', 'administrators')",
+          "LOWER(target_audience) LIKE '%admin%'",
+          "LOWER(target_audience) LIKE '%all system users%'"
+        ];
 
-    // Exclude current user's own posts from dashboard view
-    if (currentUserId && currentUserId > 0 && !allAudienceOnly && !authorName) {
-      whereConditions.push(`(author_id IS NULL OR author_id != ?)`);
-      params.push(currentUserId);
-    }
+        if (targetUserId) {
+          adminClauses.push("author_id = ?");
+          params.push(targetUserId);
+        }
+        if (authorName) {
+          adminClauses.push("LOWER(TRIM(author_name)) = LOWER(TRIM(?))");
+          params.push(authorName);
+        }
 
-    // Join the author's current role/designation from `users` via author_id.
-    // Purely additive — two extra columns in the response, no change to any
-    // of the WHERE-clause filtering above, so every existing caller
-    // (AdminAnnouncements, the coordinator/supervisor Announcements
-    // components, AnnouncementWidget) keeps working exactly as before and
-    // just gets two fields it doesn't look at.
-    let query = `
-      SELECT announcements.*, author_u.role AS author_role, author_u.designation AS author_designation
-      FROM announcements
-      LEFT JOIN users author_u ON author_u.id = announcements.author_id
-    `;
-    if (whereConditions.length > 0) {
-      query += ` WHERE ` + whereConditions.join(' AND ');
-    }
-    query += ` ORDER BY announcements.created_at DESC`;
+        whereConditions.push(`(${adminClauses.join(' OR ')})`);
+      }
+      // 4. COORDINATOR: Precise matching by level and department
+      else if (isCoordinator) {
+        let coordTargeted = ["LOWER(target_audience) LIKE '%coordinator%'"];
 
-    console.log('[getAnnouncements] Query:', query, 'Params:', params);
+        // Level check: if announcement specifies a level, it must match this coordinator's level
+        const cleanLevel = resolvedLevel ? String(resolvedLevel).replace(/[^0-9]/g, '') : '';
+        if (cleanLevel) {
+          coordTargeted.push(`(
+            (
+              LOWER(target_audience) NOT LIKE '%level 1%' AND LOWER(target_audience) NOT LIKE '%level 2%' AND
+              LOWER(target_audience) NOT LIKE '%level 3%' AND LOWER(target_audience) NOT LIKE '%level 4%' AND
+              LOWER(target_audience) NOT LIKE '%level1%' AND LOWER(target_audience) NOT LIKE '%level2%' AND
+              LOWER(target_audience) NOT LIKE '%level3%' AND LOWER(target_audience) NOT LIKE '%level4%'
+            )
+            OR LOWER(target_audience) LIKE ?
+            OR LOWER(target_audience) LIKE ?
+          )`);
+          params.push(`%level ${cleanLevel}%`, `%level${cleanLevel}%`);
+        }
 
-    db.query(query, params, (err, results) => {
-      if (err) {
-        console.error('[getAnnouncements] Query error:', err.message);
-        return res.status(500).json({ error: 'Failed to retrieve announcements', details: err.message });
+        // Department check: if announcement specifies a department, it must match this coordinator's department
+        const deptUpper = resolvedDept ? String(resolvedDept).trim().toUpperCase() : '';
+        let matchDeptClause = '';
+        if (deptUpper === 'IT') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- it%' AND LOWER(target_audience) NOT LIKE '%- itm%')";
+        } else if (deptUpper === 'IDS' || deptUpper === 'ITM') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- ids%' OR LOWER(target_audience) LIKE '%- itm%')";
+        } else if (deptUpper === 'CM' || deptUpper === 'AI') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- cm%' OR LOWER(target_audience) LIKE '%- ai%')";
+        }
+
+        if (matchDeptClause) {
+          coordTargeted.push(`(
+            (
+              LOWER(target_audience) NOT LIKE '%- it%'
+              AND LOWER(target_audience) NOT LIKE '%- ids%'
+              AND LOWER(target_audience) NOT LIKE '%- cm%'
+              AND LOWER(target_audience) NOT LIKE '%- itm%'
+              AND LOWER(target_audience) NOT LIKE '%- ai%'
+            )
+            OR ${matchDeptClause}
+          )`);
+        }
+
+        whereConditions.push(`(
+          LOWER(TRIM(target_audience)) IN ('all', 'all system users')
+          OR (${coordTargeted.join(' AND ')})
+        )`);
+      }
+      // 5. SUPERVISOR: Department matching (Rule: Lecturers who aren't coordinators are supervisors)
+      else if (isSupervisor) {
+        let supTargeted = ["LOWER(target_audience) LIKE '%supervisor%'"];
+
+        // Department check: if announcement specifies a department, it must match this supervisor's department
+        const deptUpper = resolvedDept ? String(resolvedDept).trim().toUpperCase() : '';
+        let matchDeptClause = '';
+        if (deptUpper === 'IT') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- it%' AND LOWER(target_audience) NOT LIKE '%- itm%')";
+        } else if (deptUpper === 'IDS' || deptUpper === 'ITM') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- ids%' OR LOWER(target_audience) LIKE '%- itm%')";
+        } else if (deptUpper === 'CM' || deptUpper === 'AI') {
+          matchDeptClause = "(LOWER(target_audience) LIKE '%- cm%' OR LOWER(target_audience) LIKE '%- ai%')";
+        }
+
+        if (matchDeptClause) {
+          supTargeted.push(`(
+            (
+              LOWER(target_audience) NOT LIKE '%- it%'
+              AND LOWER(target_audience) NOT LIKE '%- ids%'
+              AND LOWER(target_audience) NOT LIKE '%- cm%'
+              AND LOWER(target_audience) NOT LIKE '%- itm%'
+              AND LOWER(target_audience) NOT LIKE '%- ai%'
+            )
+            OR ${matchDeptClause}
+          )`);
+        } else if (deptUpper) {
+          supTargeted.push(`(
+            (
+              LOWER(target_audience) NOT LIKE '%- it%'
+              AND LOWER(target_audience) NOT LIKE '%- ids%'
+              AND LOWER(target_audience) NOT LIKE '%- cm%'
+              AND LOWER(target_audience) NOT LIKE '%- itm%'
+              AND LOWER(target_audience) NOT LIKE '%- ai%'
+            )
+            OR LOWER(target_audience) LIKE ?
+          )`);
+          params.push(`%- ${deptUpper.toLowerCase()}%`);
+        }
+
+        whereConditions.push(`(
+          LOWER(TRIM(target_audience)) IN ('all', 'all system users')
+          OR (${supTargeted.join(' AND ')})
+        )`);
+      }
+      // 6. EVERYONE ELSE (Students, Mentors, etc.)
+      else if (resolvedRole) {
+        let roleCondition = `(LOWER(target_audience) IN ('all', 'all system users') OR LOWER(target_audience) LIKE ?`;
+        params.push(`%${roleNorm}%`);
+
+        if (resolvedLevel) {
+          const cleanLevel = String(resolvedLevel).replace(/[^0-9]/g, '');
+          if (cleanLevel) {
+            roleCondition += ` OR LOWER(target_audience) LIKE ? OR LOWER(target_audience) LIKE ?`;
+            params.push(`%level ${cleanLevel}%`, `%level${cleanLevel}%`);
+          }
+        }
+
+        roleCondition += `)`;
+        whereConditions.push(roleCondition);
+      }
+      // 7. Fallback
+      else {
+        whereConditions.push(`LOWER(target_audience) IN ('all', 'all system users')`);
       }
 
-      console.log('[getAnnouncements] Success, found', results.length, 'announcements');
-      return res.status(200).json({ success: true, announcements: results || [] });
-    });
+      // Exclude current user's own posts from dashboard view
+      if (currentUserId && currentUserId > 0 && !allAudienceOnly && !authorName) {
+        whereConditions.push(`(author_id IS NULL OR author_id != ?)`);
+        params.push(currentUserId);
+      }
+
+      let query = `
+        SELECT announcements.*, author_u.role AS author_role, author_u.designation AS author_designation
+        FROM announcements
+        LEFT JOIN users author_u ON author_u.id = announcements.author_id
+      `;
+      if (whereConditions.length > 0) {
+        query += ` WHERE ` + whereConditions.join(' AND ');
+      }
+      query += ` ORDER BY announcements.created_at DESC`;
+
+      console.log('[getAnnouncements] Query:', query, 'Params:', params);
+
+      db.query(query, params, (err, results) => {
+        if (err) {
+          console.error('[getAnnouncements] Query error:', err.message);
+          return res.status(500).json({ error: 'Failed to retrieve announcements', details: err.message });
+        }
+
+        console.log('[getAnnouncements] Success, found', results.length, 'announcements');
+        return res.status(200).json({ success: true, announcements: results || [] });
+      });
+    };
+
+    // If user_id is provided, look up authoritative user info from users table
+    if (targetUserId) {
+      db.query('SELECT role, designation, level, academic_unit FROM users WHERE id = ?', [targetUserId], (err, uRows) => {
+        if (!err && uRows && uRows[0]) {
+          const u = uRows[0];
+          const rawRole = String(u.role || '').toLowerCase().trim();
+          const rawDesignation = String(u.designation || '').toLowerCase().trim();
+
+          let resRole = u.role || userRole;
+          let resDesignation = u.designation || userDesignation;
+
+          if (rawRole === 'admin') {
+            resRole = 'admin';
+          } else {
+            const isCoord = rawDesignation === 'coordinator' || rawRole === 'coordinator';
+            const isSup = !isCoord && (
+              rawRole === 'supervisor' ||
+              rawDesignation === 'supervisor' ||
+              (rawRole === 'lecturer' && rawDesignation !== 'coordinator')
+            );
+
+            if (isCoord) {
+              resRole = 'coordinator';
+              resDesignation = 'coordinator';
+            } else if (isSup) {
+              resRole = 'supervisor';
+              resDesignation = 'supervisor';
+            }
+          }
+
+          const resLevel = (u.level !== null && u.level !== undefined) ? String(u.level) : userLevel;
+          const resDept = u.academic_unit || userDepartment;
+          return executeQuery(resRole, resDesignation, resLevel, resDept);
+        }
+        return executeQuery(userRole, userDesignation, userLevel, userDepartment);
+      });
+    } else {
+      executeQuery(userRole, userDesignation, userLevel, userDepartment);
+    }
   });
 };
 

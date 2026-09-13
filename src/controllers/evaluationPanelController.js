@@ -561,51 +561,6 @@ const submitEvaluationMarks = async (req, res) => {
             );
         }
 
-        // 5. Flip this panel's own evaluation_panels row to 'completed' now
-        // that its marks have actually been submitted. Previously nothing
-        // did this outside of the coordinator's manual "Complete" action on
-        // the Final stage (completePanelsForGroups in calendarController.js)
-        // — every other panel stayed 'scheduled' forever once marked, so it
-        // kept showing up in "Upcoming Panels" (filters on status !=
-        // 'completed') indefinitely, while the dashboard's "Pending
-        // Evaluations" count (filters on no marks existing yet) correctly
-        // stopped counting it — the two cards visibly disagreed. Prefers
-        // panel_id (passed by the evaluation panel screen and unambiguous);
-        // falls back to matching by group name + level + evaluation type
-        // for older callers that don't send it. Non-fatal: the marks above
-        // already saved successfully, so a failure here shouldn't fail the
-        // whole submission.
-        try {
-            await ensureEvaluationPanelStatusColumn();
-
-            if (panel_id) {
-                await db.promise().query(
-                    `UPDATE evaluation_panels SET status = 'completed' WHERE id = ? AND status != 'completed'`,
-                    [panel_id]
-                );
-            } else {
-                const [groupRows] = await db.promise().query(
-                    `SELECT group_name, level FROM project_groups WHERE id = ?`,
-                    [group_id]
-                );
-                const groupName = groupRows[0]?.group_name;
-                const levelForMatch = academic_level || groupRows[0]?.level;
-
-                if (groupName && levelForMatch && evaluation_type) {
-                    await db.promise().query(
-                        `UPDATE evaluation_panels
-                         SET status = 'completed'
-                         WHERE target_group = ? AND academic_level = ?
-                           AND LOWER(TRIM(evaluation_type)) = LOWER(TRIM(?))
-                           AND status != 'completed'`,
-                        [groupName, levelForMatch, evaluation_type]
-                    );
-                }
-            }
-        } catch (statusError) {
-            console.warn('Failed to auto-complete evaluation panel after marks submission:', statusError.message);
-        }
-
         return res.status(200).json({
             success: true,
             message: 'Evaluation marks and feedback submitted successfully.'
