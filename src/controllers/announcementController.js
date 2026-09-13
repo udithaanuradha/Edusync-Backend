@@ -1,8 +1,67 @@
 const db = require('../config/db');
+const dbPromise = db.promise();
 
 let ensureAnnouncementsTablePromise = null;
 
+// Self-healing column: `priority` didn't exist on the original announcements
+// table, so CREATE TABLE IF NOT EXISTS (which only applies to a table that
+// doesn't exist yet) never retroactively adds it to an already-created one.
+// Checked once per process and cached, same pattern as
+// calendarController.js's ensureEvaluationPanelSupervisorsColumn.
+let ensureAnnouncementPriorityColumnPromise = null;
+const ensureAnnouncementPriorityColumn = async () => {
+  if (!ensureAnnouncementPriorityColumnPromise) {
+    ensureAnnouncementPriorityColumnPromise = (async () => {
+      try {
+        const [columns] = await dbPromise.query('SHOW COLUMNS FROM announcements');
+        const hasColumn = (columns || []).some((column) => column.Field === 'priority');
+        if (!hasColumn) {
+          await dbPromise.query(
+            `ALTER TABLE announcements ADD COLUMN priority VARCHAR(16) NOT NULL DEFAULT 'normal'`
+          );
+        }
+      } catch (error) {
+        console.warn('announcements priority column check failed:', error.message);
+      }
+    })();
+  }
+  await ensureAnnouncementPriorityColumnPromise;
+};
+
+// `target_audience` can now hold several comma-joined values at once (e.g.
+// "Supervisor,Student", from Announcements.tsx's multi-select) — the
+// original VARCHAR(64) truncates once enough audiences are combined (all
+// four role options plus all four levels comes to ~71 characters), silently
+// dropping whichever ones didn't fit. Widened once per process, same
+// self-healing pattern as the priority column above.
+let ensureAnnouncementAudienceWidthPromise = null;
+const ensureAnnouncementAudienceWidth = async () => {
+  if (!ensureAnnouncementAudienceWidthPromise) {
+    ensureAnnouncementAudienceWidthPromise = (async () => {
+      try {
+        const [columns] = await dbPromise.query('SHOW COLUMNS FROM announcements');
+        const column = (columns || []).find((col) => col.Field === 'target_audience');
+        const lengthMatch = column ? /varchar\((\d+)\)/i.exec(column.Type || '') : null;
+        const currentLength = lengthMatch ? Number(lengthMatch[1]) : 0;
+        if (currentLength && currentLength < 255) {
+          await dbPromise.query(
+            `ALTER TABLE announcements MODIFY COLUMN target_audience VARCHAR(255) NOT NULL DEFAULT 'All'`
+          );
+        }
+      } catch (error) {
+        console.warn('announcements target_audience width check failed:', error.message);
+      }
+    })();
+  }
+  await ensureAnnouncementAudienceWidthPromise;
+};
+
 const normalizeAudience = (value) => String(value || '').trim().toLowerCase();
+
+const normalizePriority = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'urgent' ? 'urgent' : 'normal';
+};
 
 const firstNonEmptyString = (...values) => {
   for (const value of values) {
@@ -43,6 +102,13 @@ const createAnnouncement = (req, res) => {
     || req.user?.id
     || null;
 
+  // Coordinator/supervisor forms send `priority` ('normal' | 'urgent');
+  // accept a couple of aliases defensively and fall back to 'normal' for
+  // anything else, matching what AnnouncementWidget.tsx's getPriority reads.
+  const priority = normalizePriority(
+    req.body.priority ?? req.body.priority_level ?? req.body.urgency
+  );
+
   if (!title || !message) {
     return res.status(400).json({ error: 'Title and message are required' });
   }
@@ -52,28 +118,32 @@ const createAnnouncement = (req, res) => {
       id INT AUTO_INCREMENT PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
       message TEXT NOT NULL,
-      target_audience VARCHAR(64) NOT NULL DEFAULT 'All',
+      target_audience VARCHAR(255) NOT NULL DEFAULT 'All',
       author_name VARCHAR(255) NOT NULL,
       author_id INT,
+      priority VARCHAR(16) NOT NULL DEFAULT 'normal',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `;
 
-  db.query(createTableQuery, (err) => {
+  db.query(createTableQuery, async (err) => {
     if (err && err.code !== 'ER_TABLE_EXISTS_ERROR') {
       console.error('Table creation error:', err);
       return res.status(500).json({ error: 'Database setup failed' });
     }
 
+    await ensureAnnouncementPriorityColumn();
+    await ensureAnnouncementAudienceWidth();
+
     const normalizedAudience = String(targetAudience).trim();
     const normalizedAuthor = String(authorName).trim();
 
     const insertQuery = `
-      INSERT INTO announcements (title, message, target_audience, author_name, author_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO announcements (title, message, target_audience, author_name, author_id, priority)
+      VALUES (?, ?, ?, ?, ?, ?)
     `;
 
-    db.query(insertQuery, [title, message, normalizedAudience, normalizedAuthor, authorId], (err, result) => {
+    db.query(insertQuery, [title, message, normalizedAudience, normalizedAuthor, authorId, priority], (err, result) => {
       if (err) {
         console.error('Insert error:', err);
         return res.status(500).json({ error: 'Database failure' });
@@ -88,7 +158,8 @@ const createAnnouncement = (req, res) => {
           message,
           target_audience: normalizedAudience,
           author_name: normalizedAuthor,
-          author_id: authorId
+          author_id: authorId,
+          priority
         }
       });
     });
@@ -110,18 +181,22 @@ const getAnnouncements = (req, res) => {
       id INT AUTO_INCREMENT PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
       message TEXT NOT NULL,
-      target_audience VARCHAR(64) NOT NULL DEFAULT 'All',
+      target_audience VARCHAR(255) NOT NULL DEFAULT 'All',
       author_name VARCHAR(255) NOT NULL,
       author_id INT,
+      priority VARCHAR(16) NOT NULL DEFAULT 'normal',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `;
 
-  db.query(createTableQuery, (tableErr) => {
+  db.query(createTableQuery, async (tableErr) => {
     if (tableErr && tableErr.code !== 'ER_TABLE_EXISTS_ERROR') {
       console.error('[getAnnouncements] Table creation error:', tableErr);
       return res.status(500).json({ error: 'Database setup failed' });
     }
+
+    await ensureAnnouncementPriorityColumn();
+    await ensureAnnouncementAudienceWidth();
 
     let whereConditions = [];
     let params = [];

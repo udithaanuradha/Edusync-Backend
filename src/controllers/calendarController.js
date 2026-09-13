@@ -296,6 +296,22 @@ const getUpcomingPanels = async (req, res) => {
         const department = scope ? scope.department : null;
         const level = studentGroupScope ? studentGroupScope.level : (scope ? scope.level : null);
 
+        // A panel's `status` only ever flips to 'completed' when the
+        // coordinator clicks "Complete" on the Reports tab (see
+        // completePanelsForGroups below) — but evaluators can submit marks
+        // for that stage well before that click happens. Without this flag,
+        // the Calendar's "Upcoming Panels" list looks identical whether a
+        // panel hasn't been touched yet or is fully marked and just waiting
+        // on that one confirmation click, so surface it as its own signal.
+        const marksSubmittedSubquery = `
+            EXISTS (
+                SELECT 1 FROM marks m
+                JOIN project_stages ps ON ps.stage_id = m.stage_id
+                WHERE m.group_id = pg.id
+                  AND LOWER(TRIM(ps.stage_name)) = LOWER(TRIM(ep.evaluation_type))
+            )
+        `;
+
         const query = `
             SELECT
                 ep.*,
@@ -303,7 +319,8 @@ const getUpcomingPanels = async (req, res) => {
                 pg.supervisor_id,
                 pg.supervisor_id_2,
                 u1.name as group_supervisor_name,
-                u2.name as group_supervisor_name_2
+                u2.name as group_supervisor_name_2,
+                ${marksSubmittedSubquery} AS marks_submitted
             FROM evaluation_panels ep
             LEFT JOIN project_groups pg ON (
                 LOWER(TRIM(pg.group_name)) = LOWER(TRIM(ep.target_group))

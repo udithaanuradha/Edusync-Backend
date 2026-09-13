@@ -43,6 +43,31 @@ const ensureStageAcademicUnitColumn = async () => {
     await ensureStageAcademicUnitColumnPromise;
 };
 
+// Same self-heal pattern as ensureStageAcademicUnitColumn above, for the
+// staff-only Marking Criteria rubric path (see migrations/add-marking-criteria-file.sql
+// for the standalone version). A separate column rather than a stage_files
+// row: a stage has at most one rubric, it's coordinator-set metadata on the
+// stage itself, and — critically — it must never surface in the same list
+// the student view reads (stage_files), only through this dedicated column
+// which getStagesByLevel's controller strips for non-staff callers.
+let ensureStageMarkingCriteriaColumnPromise = null;
+const ensureStageMarkingCriteriaColumn = async () => {
+    if (!ensureStageMarkingCriteriaColumnPromise) {
+        ensureStageMarkingCriteriaColumnPromise = (async () => {
+            try {
+                const [columns] = await dbPromise.query('SHOW COLUMNS FROM project_stages');
+                const hasColumn = (columns || []).some((column) => column.Field === 'marking_criteria_file');
+                if (!hasColumn) {
+                    await dbPromise.query(`ALTER TABLE project_stages ADD COLUMN marking_criteria_file TEXT DEFAULT NULL`);
+                }
+            } catch (error) {
+                console.warn('project_stages marking_criteria_file column check failed:', error.message);
+            }
+        })();
+    }
+    await ensureStageMarkingCriteriaColumnPromise;
+};
+
 const getStagesByLevel = (level, coordinatorId, academicUnit, callback) => {
     if (typeof academicUnit === 'function') {
         callback = academicUnit;
@@ -54,7 +79,7 @@ const getStagesByLevel = (level, coordinatorId, academicUnit, callback) => {
         academicUnit = null;
     }
 
-    ensureStageAcademicUnitColumn().then(() => {
+    Promise.all([ensureStageAcademicUnitColumn(), ensureStageMarkingCriteriaColumn()]).then(() => {
     // First get all stages for this level created by this coordinator
     // NOTE: `u.academic_unit` is deliberately left unaliased and placed after
     // `ps.*` so it keeps winning the `academic_unit` key in the result object
@@ -139,6 +164,16 @@ const normalizeLinkValue = (value) => {
     return trimmed || null;
 };
 
+// Thrown by the duplicate-name checks below; callers key off `.code` rather
+// than the message text so the controller can map it to a 409 instead of a
+// generic 500.
+class DuplicateStageNameError extends Error {
+    constructor(stageName) {
+        super(`A stage named "${stageName}" already exists for this level.`);
+        this.code = 'DUPLICATE_STAGE_NAME';
+    }
+}
+
 const createStage = (data, callback) => {
     const {
         level,
@@ -151,24 +186,45 @@ const createStage = (data, callback) => {
         mentor_details_url,
     } = data;
     const linkValue = normalizeLinkValue(resource_links ?? resource_link ?? mentor_details_url ?? null);
+    const trimmedStageName = String(stage_name || '').trim();
 
     ensureStageAcademicUnitColumn().then(() => {
-        // Scope the stage to its creating coordinator's own degree program, so
-        // students in other programs at the same level don't see it (see
-        // getStagesByLevel's academicUnit filter). Falls back to NULL (visible
-        // to everyone) if the creator has no academic_unit set, matching how
-        // pre-existing stages behave.
-        db.query('SELECT academic_unit FROM users WHERE id = ?', [created_by], (lookupErr, rows) => {
-            if (lookupErr) return callback(lookupErr, null);
-            const academicUnit = normalizeAcademicUnit(rows && rows[0] ? rows[0].academic_unit : null);
+        // Belt-and-braces against the same duplicate the frontend already
+        // blocks in StageManagement.tsx's handleAddStage — a direct API call
+        // (or a second tab) bypasses that client-side check entirely, and
+        // two stages sharing a name at the same level makes the Calendar's
+        // Evaluation Type dropdown, marks linking, and final-grade totals
+        // ambiguous about which stage's data actually applies. Scoped to the
+        // same (level, created_by) pair the coordinator's own stage list is
+        // scoped to, so this never conflicts with another coordinator's
+        // identically-named stage.
+        db.query(
+            'SELECT stage_id FROM project_stages WHERE level = ? AND created_by = ? AND LOWER(TRIM(stage_name)) = LOWER(TRIM(?))',
+            [level, created_by, trimmedStageName],
+            (dupErr, dupRows) => {
+                if (dupErr) return callback(dupErr, null);
+                if (dupRows && dupRows.length > 0) {
+                    return callback(new DuplicateStageNameError(trimmedStageName), null);
+                }
 
-            db.query(
-                `INSERT INTO project_stages (level, stage_name, description, deadline, created_by, resource_links, academic_unit)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)` ,
-                [level, stage_name, description, deadline || null, created_by, linkValue, academicUnit],
-                callback
-            );
-        });
+                // Scope the stage to its creating coordinator's own degree program, so
+                // students in other programs at the same level don't see it (see
+                // getStagesByLevel's academicUnit filter). Falls back to NULL (visible
+                // to everyone) if the creator has no academic_unit set, matching how
+                // pre-existing stages behave.
+                db.query('SELECT academic_unit FROM users WHERE id = ?', [created_by], (lookupErr, rows) => {
+                    if (lookupErr) return callback(lookupErr, null);
+                    const academicUnit = normalizeAcademicUnit(rows && rows[0] ? rows[0].academic_unit : null);
+
+                    db.query(
+                        `INSERT INTO project_stages (level, stage_name, description, deadline, created_by, resource_links, academic_unit)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)` ,
+                        [level, stage_name, description, deadline || null, created_by, linkValue, academicUnit],
+                        callback
+                    );
+                });
+            }
+        );
     }).catch((err) => callback(err, null));
 };
 
@@ -217,15 +273,58 @@ const deleteStage = (id, callback) => {
 const updateStage = (id, data, callback) => {
     const { stage_name, description, deadline, resource_link, resource_links, mentor_details_url } = data;
     const linkValue = normalizeLinkValue(resource_links ?? resource_link ?? mentor_details_url ?? null);
-    db.query(
-        'UPDATE project_stages SET stage_name=?, description=?, deadline=?, resource_links=? WHERE stage_id=?',
-        [stage_name, description, deadline || null, linkValue, id],
-        callback
-    );
+    const trimmedStageName = String(stage_name || '').trim();
+
+    // The request body only ever carries the edited fields, not this stage's
+    // own level/creator — those are looked up here rather than trusted from
+    // the client, then used to scope the same duplicate-name check
+    // createStage runs, excluding this stage's own row so re-saving it under
+    // its unchanged name doesn't flag against itself.
+    db.query('SELECT level, created_by FROM project_stages WHERE stage_id = ?', [id], (lookupErr, rows) => {
+        if (lookupErr) return callback(lookupErr, null);
+        if (!rows || rows.length === 0) {
+            return callback(new Error('Stage not found'), null);
+        }
+        const { level, created_by } = rows[0];
+
+        db.query(
+            'SELECT stage_id FROM project_stages WHERE level = ? AND created_by = ? AND stage_id != ? AND LOWER(TRIM(stage_name)) = LOWER(TRIM(?))',
+            [level, created_by, id, trimmedStageName],
+            (dupErr, dupRows) => {
+                if (dupErr) return callback(dupErr, null);
+                if (dupRows && dupRows.length > 0) {
+                    return callback(new DuplicateStageNameError(trimmedStageName), null);
+                }
+
+                db.query(
+                    'UPDATE project_stages SET stage_name=?, description=?, deadline=?, resource_links=? WHERE stage_id=?',
+                    [stage_name, description, deadline || null, linkValue, id],
+                    callback
+                );
+            }
+        );
+    });
 };
 
 const uploadStageFile = (data, callback) => {
-    const { stage_id, file_name, file_url, uploaded_by } = data;
+    const { stage_id, file_name, file_url, uploaded_by, file_category } = data;
+
+    if (file_category === 'marking_criteria') {
+        // Staff-only rubric: overwrite the single column on the stage
+        // itself. Deliberately NOT inserted into stage_files — that table
+        // backs the Supporting Documents list the student view also reads
+        // from (see stage_files SELECT in getStagesByLevel above), and a
+        // rubric must never end up there.
+        ensureStageMarkingCriteriaColumn().then(() => {
+            db.query(
+                'UPDATE project_stages SET marking_criteria_file = ? WHERE stage_id = ?',
+                [file_url, stage_id],
+                callback
+            );
+        }).catch((err) => callback(err, null));
+        return;
+    }
+
     db.query(
         'INSERT INTO stage_files (stage_id, file_name, file_url, uploaded_by) VALUES (?, ?, ?, ?)',
         [stage_id, file_name, file_url, uploaded_by],
@@ -233,4 +332,26 @@ const uploadStageFile = (data, callback) => {
     );
 };
 
-module.exports = { getStagesByLevel, getStageById, createStage, deleteStage, updateStage, uploadStageFile };
+// DELETE /api/projects/files/:file_id — removes one Supporting Document row.
+const deleteStageFile = (fileId, callback) => {
+    db.query('DELETE FROM stage_files WHERE file_id = ?', [fileId], callback);
+};
+
+// DELETE /api/projects/marking-criteria/:stage_id — clears a stage's rubric
+// so a coordinator can remove or replace one that was uploaded in error.
+const deleteMarkingCriteria = (stageId, callback) => {
+    ensureStageMarkingCriteriaColumn().then(() => {
+        db.query('UPDATE project_stages SET marking_criteria_file = NULL WHERE stage_id = ?', [stageId], callback);
+    }).catch((err) => callback(err, null));
+};
+
+module.exports = {
+    getStagesByLevel,
+    getStageById,
+    createStage,
+    deleteStage,
+    updateStage,
+    uploadStageFile,
+    deleteStageFile,
+    deleteMarkingCriteria,
+};
