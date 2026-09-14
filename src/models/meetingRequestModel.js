@@ -48,7 +48,8 @@ const isSupervisorAssignedToStudent = (studentId, supervisorId, callback) => {
 const getAssignedSupervisorsForStudent = (studentId, callback) => {
   const query = `
     SELECT DISTINCT pg.supervisor_id AS id1, u1.name AS name1,
-                     pg.supervisor_id_2 AS id2, u2.name AS name2
+                     pg.supervisor_id_2 AS id2, u2.name AS name2,
+                     pg.group_name AS groupName
     FROM project_groups pg
     JOIN project_group_members gm ON gm.group_id = pg.id
     LEFT JOIN users u1 ON u1.id = pg.supervisor_id
@@ -59,11 +60,18 @@ const getAssignedSupervisorsForStudent = (studentId, callback) => {
     if (err) return callback(err);
 
     const byId = new Map();
+    // Students belong to at most one group in practice — take the first
+    // non-empty group_name seen so the request form can auto-fill it.
+    let groupName = null;
     rows.forEach((row) => {
       if (row.id1 != null) byId.set(row.id1, row.name1 || `Supervisor ${row.id1}`);
       if (row.id2 != null) byId.set(row.id2, row.name2 || `Supervisor ${row.id2}`);
+      if (!groupName && row.groupName) groupName = row.groupName;
     });
-    callback(null, [...byId.entries()].map(([id, name]) => ({ id, name })));
+    callback(null, {
+      supervisors: [...byId.entries()].map(([id, name]) => ({ id, name })),
+      groupName,
+    });
   });
 };
 

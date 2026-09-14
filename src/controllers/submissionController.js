@@ -333,6 +333,13 @@ const getCoordinatorSubmissionsByLevel = async (req, res) => {
       ps.level,
       u.name AS student_name,
       u.email AS student_email,
+      -- Required so the frontend's "Not Submitted" tab (GradebookTable.tsx)
+      -- can tell which groups already have a real submission for a given
+      -- stage. Without it every row's group_id silently defaulted to 0 on
+      -- the client, so the diff against the coordinator's real group list
+      -- never matched anything — every group showed as "Not Submitted" for
+      -- every stage, even ones with an actual on-time submission on record.
+      pg.id AS group_id,
       pg.group_name,
       CASE
         WHEN ss.submitted_at IS NULL THEN 'Pending'

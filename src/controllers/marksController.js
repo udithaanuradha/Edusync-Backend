@@ -433,12 +433,12 @@ const getLevelMarksSummary = async (req, res) => {
         const scope = await getCoordinatorScope(coordinatorId);
 
         if (scope && scope.level != null && scope.level !== level) {
-            return res.json({ success: true, level, stages: [], panels: [], data: [] });
+            return res.json({ success: true, level, coordinatorDepartment: scope ? scope.department : null, stages: [], panels: [], data: [] });
         }
 
         const { stages, panels, data } = await computeLevelMarksSummary(level, scope ? scope.department : null);
         const scopedData = studentId ? data.filter((s) => s.student_id === studentId) : data;
-        return res.json({ success: true, level, stages, panels: panels || [], data: scopedData });
+        return res.json({ success: true, level, coordinatorDepartment: scope ? scope.department : null, stages, panels: panels || [], data: scopedData });
     } catch (error) {
         console.error('Error fetching level marks summary:', error);
         return res.status(500).json({ success: false, message: 'Failed to fetch marks summary', error: error.message });
@@ -620,4 +620,5 @@ module.exports = {
     getCoordinatorSubmissionTracking,
     getLevelMarksSummary,
     downloadMarksDistributionPdf,
+    computeLevelMarksSummary,
 };

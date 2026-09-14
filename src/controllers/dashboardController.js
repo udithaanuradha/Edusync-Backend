@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { ensureEvaluationPanelStatusColumn } = require('./calendarController');
 
 const toNumber = (value) => {
   const parsed = Number(value);
@@ -48,6 +49,8 @@ const getCoordinatorScope = async (coordinatorId) => {
 
 const getCoordinatorSummary = async (req, res) => {
   try {
+    await ensureEvaluationPanelStatusColumn();
+
     // Extract coordinatorId from query parameters
     const coordinatorId = req.query.coordinatorId;
 
@@ -129,20 +132,27 @@ const getCoordinatorSummary = async (req, res) => {
     // coordinator system-wide (e.g. 11, when a group's own level realistically
     // has 3-4), making "fully evaluated" nearly unreachable and the progress
     // percentage meaningless.
-    // A project is "Completed" once its FINAL stage has been evaluated —
-    // matches the same rule already applied to Calendar panel completion
-    // (the whole evaluation cycle ends at Final, not per-stage). This is
-    // also more robust than counting "all stages marked": a stage that was
-    // later replaced/recreated can leave old marks rows with a NULL
-    // stage_id (no FK match any more), which silently undercounts a
-    // marked-every-stage check but never affects a Final-specific one,
-    // since Final's own marks still carry a valid stage_id.
+    // A project is "Completed" once its FINAL panel is officially marked
+    // complete by the coordinator — NOT merely once evaluators have
+    // submitted marks for it. Those are different moments: marks can exist
+    // for the Final stage the instant an evaluator finishes scoring, well
+    // before the coordinator has clicked "Complete" on the Reports tab
+    // (calendarController's completePanelsForGroups, which is what actually
+    // flips evaluation_panels.status to 'completed'). The dashboard
+    // previously used "any marks exist for a stage named final" as its
+    // completion signal, which showed a group as 100%/Completed the moment
+    // marks landed — even with every one of its panels still 'scheduled'.
+    // This now matches the same evaluation_panels.status check
+    // marksController's finalReleasedGroups and the Calendar's "Complete"
+    // button already use as the single source of truth for "is this group
+    // actually done".
     const finalStageMarkedSubquery = `
       EXISTS (
-        SELECT 1 FROM marks m
-        JOIN project_stages ps ON ps.stage_id = m.stage_id
-        WHERE m.group_id = pg.id AND ps.level = pg.level
-          AND LOWER(TRIM(ps.stage_name)) = 'final'
+        SELECT 1 FROM evaluation_panels ep
+        WHERE LOWER(TRIM(ep.target_group)) = LOWER(TRIM(pg.group_name))
+          AND ep.academic_level = pg.level
+          AND LOWER(TRIM(ep.evaluation_type)) = 'final'
+          AND LOWER(TRIM(ep.status)) = 'completed'
       )
     `;
 
@@ -194,6 +204,14 @@ const getCoordinatorSummary = async (req, res) => {
     // has no relationship to whether a given group's panel is done, so it
     // kept "upcoming" stale long after a group's panels were marked
     // completed on the Calendar.
+    // marksSubmitted panels are excluded via NOT EXISTS in the WHERE clause,
+    // not filtered client-side after the fact — this endpoint only has one
+    // consumer (CoordinatorDashboard.tsx, always with pendingOnly), and the
+    // old approach applied LIMIT 3 to the raw panel list *before* excluding
+    // already-marked ones, so a genuinely pending panel could get silently
+    // pushed out of the top 3 by earlier panels that no longer needed the
+    // coordinator's attention at all. Filtering here means LIMIT 3 only ever
+    // spends its budget on panels that still belong on this widget.
     const upcomingDeadlinesQuery = `
       SELECT
         ep.id AS id,
@@ -202,11 +220,18 @@ const getCoordinatorSummary = async (req, res) => {
         ep.academic_level AS academicLevel,
         ep.start_time AS startTime,
         ep.target_group AS targetGroup,
-        ep.location AS location
+        ep.location AS location,
+        0 AS marksSubmitted
       FROM evaluation_panels ep
-      LEFT JOIN project_groups pg ON pg.group_name = ep.target_group
+      LEFT JOIN project_groups pg ON pg.group_name = ep.target_group AND pg.level = ep.academic_level
       WHERE ep.panel_date >= CURDATE()
         AND ep.status != 'completed'
+        AND NOT EXISTS (
+          SELECT 1 FROM marks m
+          JOIN project_stages ps ON ps.stage_id = m.stage_id
+          WHERE m.group_id = pg.id
+            AND LOWER(TRIM(ps.stage_name)) = LOWER(TRIM(ep.evaluation_type))
+        )
         ${supportsCoordinatorTracking && hasCoordinatorFilter ? 'AND pg.created_by = ?' : ''}
       ORDER BY ep.panel_date ASC, ep.start_time ASC
       LIMIT 3
@@ -263,6 +288,7 @@ const getCoordinatorSummary = async (req, res) => {
           startTime: row.startTime,
           targetGroup: row.targetGroup,
           location: row.location,
+          marksSubmitted: Boolean(Number(row.marksSubmitted ?? 0)),
         }))
       : [];
 

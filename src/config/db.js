@@ -11,18 +11,16 @@ const db = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  timezone: '+05:30',
-
-  // Without an explicit connectTimeout, a pooled connection that the remote
-  // side (or an intervening network hop) silently dropped just hangs until
-  // the OS-level TCP timeout — which is what surfaced as every controller
-  // logging `connect ETIMEDOUT` at once during a brief network blip.
-  // enableKeepAlive sends periodic TCP keepalive probes so a dead
-  // connection gets detected and the pool can replace it, instead of a
-  // query being handed a connection that looks idle-but-alive and isn't.
-  connectTimeout: 10000,
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 10000,
+  // TiDB Cloud stores/returns TIMESTAMP/DATETIME values in UTC — this must
+  // match the *server's* actual timezone (it tells mysql2 how to interpret
+  // what it reads back), not the app's local timezone. It was set to
+  // '+05:30' (Sri Lanka), which made every timestamp read from the DB get
+  // misinterpreted as already being in +05:30 when it was really UTC,
+  // shifting every displayed time ~5.5 hours off. 'Z' = UTC, matching what
+  // the server actually sends; the frontend's own toLocaleTimeString()
+  // calls already convert UTC to each viewer's local time correctly, so no
+  // frontend change is needed once this matches reality.
+  timezone: 'Z',
 
   ssl: { rejectUnauthorized: true }
 });
