@@ -4,6 +4,7 @@ const {
   createMilestone,
   getMilestonesByGroup,
   updateMilestoneStatus,
+  updateMilestoneDetails,
   getUnseenFeedbackCount,
   markGroupFeedbackSeen,
   deleteMilestone,
@@ -14,9 +15,15 @@ const {
   getTasksByGroup,
   updateTaskStatus,
   deleteTask,
+  uploadTaskFile,
   upsertOverview,
-  getOverviewByGroup
+  getOverviewByGroup,
+  getScopeSectionsByGroup,
+  createScopeSection,
+  updateScopeSection,
+  deleteScopeSection
 } = require('../controllers/milestoneController');
+const { upload } = require('../config/cloudinaryConfig');
 
  
 // PROJECT OVERVIEW ROUTES
@@ -37,6 +44,9 @@ router.get('/group/:groupId', getMilestonesByGroup);
 // Update milestone status (PENDING, REJECTED, APPROVED) and feedback
 router.put('/:id/status', updateMilestoneStatus);
 
+// Edit an existing milestone's own details (title/description/dates) — leader-only
+router.put('/:id', updateMilestoneDetails);
+
 // Count of unseen supervisor feedback items across all of a student's groups
 // (backs the red notification badge in Header.tsx)
 router.get('/feedback/unseen-count/:studentId', getUnseenFeedbackCount);
@@ -49,7 +59,25 @@ router.delete('/:id', deleteMilestone);
 
 
 
- 
+// SCOPE DIVISION ROUTES — project-wide (per-group), not per-milestone.
+// Any group member creates their own section directly (capped at one per
+// student); creating it makes them its owner. No separate claim step —
+// there is no claim route any more.
+
+// List a group's (whole-project) scope sections (creator name resolved)
+router.get('/group/:groupId/scope', getScopeSectionsByGroup);
+
+// Create a new scope section, owned by the calling student immediately
+router.post('/group/:groupId/scope', createScopeSection);
+
+// Edit a scope section's title/description (owner-only, no leader override)
+router.put('/scope/:id', updateScopeSection);
+
+// Delete a scope section entirely (owner-only, no leader override)
+router.delete('/scope/:id', deleteScopeSection);
+
+
+
 // TASK ROUTES
  
 
@@ -74,5 +102,22 @@ router.put('/tasks/:id/status', updateTaskStatus);
 
 // Delete a task
 router.delete('/tasks/:id', deleteTask);
+
+// Attach one optional file to an already-created task (task_id + uploaded_by
+// in the multipart body) — same upload.single('file') middleware
+// submissionRoutes.js already uses, its own Cloudinary folder
+// (CLOUDINARY_TASK_FOLDER, default 'task-attachments').
+router.post(
+  '/tasks/upload-file',
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, error: err.message || 'File upload failed' });
+      }
+      next();
+    });
+  },
+  uploadTaskFile
+);
 
 module.exports = router;

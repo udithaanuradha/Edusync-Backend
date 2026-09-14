@@ -193,6 +193,16 @@ function validateUserCreation(userData) {
     }
   }
 
+  // Validate Access Key for staff roles (Lecturer & Admin)
+  if (userData.role && validateRole(userData.role)) {
+    const roleLower = userData.role.toLowerCase();
+    if (roleLower === 'lecturer' && (!userData.accessKey || String(userData.accessKey).trim() === '')) {
+      errors.push('Lecturer Key is required');
+    } else if (roleLower === 'admin' && (!userData.accessKey || String(userData.accessKey).trim() === '')) {
+      errors.push('Admin Key is required');
+    }
+  }
+
   return {
     valid: errors.length === 0,
     errors: errors

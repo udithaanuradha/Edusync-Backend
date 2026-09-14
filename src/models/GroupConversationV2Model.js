@@ -64,17 +64,18 @@ const ensureTables = async () => {
 };
 
 /**
- * Every project group this user has any stake in — as a student member, the
- * assigned supervisor, or the assigned mentor. Source of truth for both
- * "which conversations should exist" and "who should be in them".
+ * Every project group this user has any stake in — as a student member, an
+ * assigned supervisor (primary or second), or the assigned mentor. Source of
+ * truth for both "which conversations should exist" and "who should be in
+ * them".
  */
 const getUserProjectGroups = async (userId) => {
   const [rows] = await dbPromise.query(
-    `SELECT DISTINCT pg.id, pg.group_name, pg.level, pg.supervisor_id, pg.mentor_id
+    `SELECT DISTINCT pg.id, pg.group_name, pg.level, pg.supervisor_id, pg.supervisor_id_2, pg.mentor_id
      FROM project_groups pg
      LEFT JOIN project_group_members gm ON gm.group_id = pg.id
-     WHERE gm.student_id = ? OR pg.supervisor_id = ? OR pg.mentor_id = ?`,
-    [userId, userId, userId]
+     WHERE gm.student_id = ? OR pg.supervisor_id = ? OR pg.supervisor_id_2 = ? OR pg.mentor_id = ?`,
+    [userId, userId, userId, userId]
   );
   return rows;
 };
@@ -82,24 +83,30 @@ const getUserProjectGroups = async (userId) => {
 /**
  * Idempotent get-or-create + membership sync for one project group's
  * supervisor-chat or mentor-chat. No-ops if that role isn't assigned yet.
+ * The supervisor-chat seats both supervisor_id and supervisor_id_2 (when a
+ * group has a second supervisor) in the same conversation alongside the
+ * students — one chat per group per role, not a separate chat per supervisor.
  */
 const ensureGroupConversation = async (projectGroupId, type) => {
   await ensureTables();
 
   const [groupRows] = await dbPromise.query(
-    `SELECT supervisor_id, mentor_id FROM project_groups WHERE id = ?`,
+    `SELECT supervisor_id, supervisor_id_2, mentor_id FROM project_groups WHERE id = ?`,
     [projectGroupId]
   );
   if (!groupRows.length) return null;
 
-  const staffId = type === 'mentor' ? groupRows[0].mentor_id : groupRows[0].supervisor_id;
-  if (!staffId) return null; // nothing assigned yet — no chat to provision
+  const staffIds = type === 'mentor'
+    ? [groupRows[0].mentor_id]
+    : [groupRows[0].supervisor_id, groupRows[0].supervisor_id_2];
+  const assignedStaffIds = staffIds.filter(Boolean);
+  if (!assignedStaffIds.length) return null; // nothing assigned yet — no chat to provision
 
   const [memberRows] = await dbPromise.query(
     `SELECT student_id FROM project_group_members WHERE group_id = ?`,
     [projectGroupId]
   );
-  const targetUserIds = [staffId, ...memberRows.map((m) => m.student_id)];
+  const targetUserIds = [...assignedStaffIds, ...memberRows.map((m) => m.student_id)];
 
   await dbPromise.query(
     `INSERT INTO group_conversations (project_group_id, type) VALUES (?, ?)

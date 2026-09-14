@@ -2,16 +2,20 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const db = require('../config/db');
-const { sendMentorInviteEmail } = require('../config/emailConfig');
+const { 
+  sendMentorInviteEmail, 
+  sendMentorOffboardingAppreciationEmail,
+  sendMentorNewGroupAssignmentEmail 
+} = require('../config/emailConfig');
 const { validatePassword } = require('../utils/validators');
 
 // 1. PREVIEW EXCEL DETAILS WITH ACTIVE GROUPS FOR SPECIFIC LEVEL
 router.post('/preview-upload', (req, res) => {
   const { mentors, level } = req.body;
-  const targetLevel = level || 1;
+  const targetLevel = Number(level) || 1;
 
-  if (!mentors || !Array.isArray(mentors)) {
-    return res.status(400).json({ error: "Invalid data format provided." });
+  if (!mentors || !Array.isArray(mentors) || mentors.length === 0) {
+    return res.status(400).json({ success: false, error: "No valid mentor rows found in the uploaded file." });
   }
 
   const query = `
@@ -23,58 +27,272 @@ router.post('/preview-upload', (req, res) => {
   db.query(query, [targetLevel], (err, groups) => {
     if (err) {
       console.error("Error fetching project groups:", err);
-      return res.status(500).json({ error: "Database error fetching active groups." });
+      return res.status(500).json({ success: false, error: "Database error fetching active groups." });
     }
 
-    const verifiedMentors = (mentors || []).map(m => {
-      const matchedGroup = (groups || []).find(g => 
-        (m.groupNo && String(g.id) === String(m.groupNo)) || 
-        (g.group_name && m.groupName && String(g.group_name).toLowerCase().trim() === String(m.groupName).toLowerCase().trim())
+    if (!groups || groups.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: `No registered project groups found for Level ${targetLevel}. Please register project groups first.`
+      });
+    }
+
+    const groupIds = groups.map(g => g.id);
+
+    // Fetch all mentors currently assigned to these groups across junction table + legacy column
+    const mentorQuery = `
+      SELECT pgm.group_id, u.id AS mentor_id, u.name AS mentor_name, u.email AS mentor_email, u.is_verified
+      FROM project_group_mentors pgm
+      JOIN users u ON u.id = pgm.mentor_id
+      WHERE pgm.group_id IN (?)
+      UNION
+      SELECT pg.id AS group_id, u.id AS mentor_id, u.name AS mentor_name, u.email AS mentor_email, u.is_verified
+      FROM project_groups pg
+      JOIN users u ON u.id = pg.mentor_id
+      WHERE pg.id IN (?) AND pg.mentor_id IS NOT NULL
+    `;
+
+    db.query(mentorQuery, [groupIds, groupIds], (mentorErr, assignedMentors) => {
+      const assignedList = assignedMentors || [];
+
+      const verifiedMentors = (mentors || []).map(m => {
+        const matchedGroup = (groups || []).find(g => 
+          (m.groupNo && String(g.id) === String(m.groupNo).trim()) || 
+          (g.group_name && m.groupName && String(g.group_name).toLowerCase().trim() === String(m.groupName).toLowerCase().trim())
+        );
+
+        const hasValidDetails = Boolean(m.name && m.name.trim() && m.email && m.email.trim());
+        const targetGroupId = matchedGroup ? matchedGroup.id : null;
+
+        // Check if THIS EXACT mentor email is already assigned to THIS group in DB
+        const isAlreadyAssigned = Boolean(
+          targetGroupId &&
+          hasValidDetails &&
+          assignedList.some(assigned => 
+            Number(assigned.group_id) === Number(targetGroupId) &&
+            String(assigned.mentor_email || '').toLowerCase().trim() === String(m.email).toLowerCase().trim() &&
+            Number(assigned.is_verified) === 1
+          )
+        );
+
+        return {
+          ...m,
+          groupId: targetGroupId,
+          groupMatched: !!matchedGroup && hasValidDetails,
+          isAlreadyAssigned: isAlreadyAssigned
+        };
+      });
+
+      // Check which registered level groups have been matched
+      const matchedGroupIds = new Set(
+        verifiedMentors
+          .filter(m => m.groupMatched && m.groupId)
+          .map(m => m.groupId)
       );
 
-      return {
-        ...m,
-        groupId: matchedGroup ? matchedGroup.id : null,
-        groupMatched: !!matchedGroup
-      };
-    });
+      const missingGroups = groups.filter(g => !matchedGroupIds.has(g.id));
+      const hasUnmatchedRows = verifiedMentors.some(m => !m.groupMatched);
+      const allGroupsCovered = (missingGroups.length === 0) && (!hasUnmatchedRows) && (groups.length > 0);
 
-    res.status(200).json({ success: true, data: verifiedMentors });
+      const newMentorsCount = verifiedMentors.filter(m => m.groupMatched && !m.isAlreadyAssigned).length;
+      const existingMentorsCount = verifiedMentors.filter(m => m.groupMatched && m.isAlreadyAssigned).length;
+
+      res.status(200).json({
+        success: true,
+        allGroupsCovered,
+        totalLevelGroups: groups.length,
+        matchedCount: matchedGroupIds.size,
+        newMentorsCount,
+        existingMentorsCount,
+        missingGroups: missingGroups.map(g => g.group_name),
+        data: verifiedMentors,
+        unfilledGroups: missingGroups.map(g => ({
+          id: g.id,
+          groupName: g.group_name,
+          status: 'Unfilled in CSV'
+        }))
+      });
+    });
   });
 });
 
-// 2. BULK SEND INVITES VIA SMTP RELAY
+// 2. BULK SEND INVITES VIA SMTP RELAY (WITH SMART DUPLICATE SKIP)
 router.post('/send-invites', async (req, res) => {
   const { mentors, academicUnit, level } = req.body; 
-  if (!mentors || mentors.length === 0) {
+  const targetLevel = Number(level) || 1;
+
+  if (!mentors || !Array.isArray(mentors) || mentors.length === 0) {
     return res.status(400).json({ error: "No mentors selected for invitation." });
   }
 
-  try {
-    const frontendDomain = process.env.FRONTEND_URL || 'http://localhost:5173';
+  // Strict backend validation: Ensure all registered groups for this level are present and filled
+  const query = `
+    SELECT id, group_name 
+    FROM project_groups 
+    WHERE level = ?
+  `;
 
-    const emailPromises = mentors.map(mentor => {
-      // Include phone and full name from CSV inside payload
-      const payload = Buffer.from(JSON.stringify({
-        email: mentor.email,
-        name: mentor.name,
-        phone: mentor.phone || null,
-        groupId: mentor.groupId,
-        academicUnit: academicUnit || 'ITM',
-        level: level || 1 
-      })).toString('base64');
+  db.query(query, [targetLevel], async (err, groups) => {
+    if (err) {
+      console.error("Database error in send-invites:", err);
+      return res.status(500).json({ error: "Database error verifying project groups." });
+    }
 
-      const setupUrl = `${frontendDomain}/mentor-setup/${payload}`;
-      return sendMentorInviteEmail(mentor.email, mentor.name, mentor.groupName, setupUrl);
-    });
+    if (!groups || groups.length === 0) {
+      return res.status(400).json({ error: `No registered project groups exist for Level ${targetLevel}.` });
+    }
 
-    await Promise.all(emailPromises);
-    res.status(200).json({ success: true, message: "All invitation emails dispatched successfully!" });
+    const validMentors = (mentors || []).filter(
+      m => m.groupId && m.name && m.name.trim() && m.email && m.email.trim() && m.email.trim().toLowerCase() !== 'pending submission'
+    );
 
-  } catch (error) {
-    console.error("Error sending emails through SMTP Relay:", error.message);
-    res.status(500).json({ error: "Failed to broadcast some onboarding emails." });
-  }
+    if (validMentors.length === 0) {
+      return res.status(400).json({ error: "No filled mentor records found in the provided list to dispatch invitations." });
+    }
+
+    const matchedGroupIds = new Set(validMentors.map(m => Number(m.groupId)));
+    const missingGroups = groups.filter(g => !matchedGroupIds.has(Number(g.id)));
+
+    try {
+      // Cluster mentors by normalized email so multiple group assignments receive a single consolidated invite email
+      const mentorClusterMap = new Map();
+      let skippedCount = 0;
+
+      for (const m of validMentors) {
+        if (m.isAlreadyAssigned) {
+          skippedCount++;
+          continue;
+        }
+
+        const emailKey = m.email.trim().toLowerCase();
+        const gId = Number(m.groupId);
+        const gName = m.groupName || `Group #${m.groupId}`;
+
+        if (!mentorClusterMap.has(emailKey)) {
+          mentorClusterMap.set(emailKey, {
+            email: m.email.trim(),
+            name: m.name.trim(),
+            phone: m.phone || null,
+            company: m.company || null,
+            groupIds: [gId],
+            groupNames: [gName],
+          });
+        } else {
+          const existing = mentorClusterMap.get(emailKey);
+          if (!existing.groupIds.includes(gId)) {
+            existing.groupIds.push(gId);
+            existing.groupNames.push(gName);
+          }
+        }
+      }
+
+      const mentorsToSend = Array.from(mentorClusterMap.values());
+
+      if (mentorsToSend.length === 0) {
+        return res.status(200).json({ 
+          success: true, 
+          newlySentCount: 0,
+          skippedCount: validMentors.length,
+          message: "All filled mentors in this CSV are already assigned and active! No new emails needed." 
+        });
+      }
+
+      const frontendDomain = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const emailsToCheck = mentorsToSend.map(m => m.email.toLowerCase().trim());
+      const findActiveUsersSql = `SELECT id, name, email, is_verified FROM users WHERE LOWER(TRIM(email)) IN (?) AND is_verified = 1`;
+
+      db.query(findActiveUsersSql, [emailsToCheck], async (findErr, activeUserRows) => {
+        if (findErr) {
+          console.error("Error checking active users in send-invites:", findErr);
+          return res.status(500).json({ error: "Database error checking mentor profiles." });
+        }
+
+        const activeUserMap = new Map();
+        (activeUserRows || []).forEach(u => {
+          activeUserMap.set(u.email.toLowerCase().trim(), u);
+        });
+
+        const emailPromises = mentorsToSend.map(async (mentor) => {
+          const emailKey = mentor.email.toLowerCase().trim();
+          const combinedGroupNames = mentor.groupNames.join(' & ');
+          const existingUser = activeUserMap.get(emailKey);
+
+          if (existingUser) {
+            // Mentor is already registered & active! Auto-link groups directly and send assignment notification email
+            const userId = existingUser.id;
+            for (const gId of mentor.groupIds) {
+              await new Promise((resolve) => {
+                db.query(
+                  "INSERT INTO project_group_mentors (group_id, mentor_id, company) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE company = VALUES(company)",
+                  [gId, userId, mentor.company || null],
+                  (jErr) => {
+                    if (jErr) {
+                      db.query(
+                        "INSERT IGNORE INTO project_group_mentors (group_id, mentor_id) VALUES (?, ?)",
+                        [gId, userId],
+                        () => {}
+                      );
+                    }
+                    db.query("UPDATE project_groups SET mentor_id = ? WHERE id = ?", [userId, gId], () => resolve());
+                  }
+                );
+              });
+            }
+
+            const loginUrl = `${frontendDomain}/login`;
+            return sendMentorNewGroupAssignmentEmail(
+              mentor.email.trim(), 
+              mentor.name.trim() || existingUser.name, 
+              combinedGroupNames, 
+              loginUrl
+            );
+          } else {
+            // New Mentor — send account setup invitation link
+            const payload = Buffer.from(JSON.stringify({
+              email: mentor.email.trim(),
+              name: mentor.name.trim(),
+              phone: mentor.phone || null,
+              company: mentor.company || null,
+              groupId: mentor.groupIds[0],
+              groupIds: mentor.groupIds,
+              groupNames: mentor.groupNames,
+              academicUnit: academicUnit || 'ITM',
+              level: targetLevel 
+            })).toString('base64');
+
+            const setupUrl = `${frontendDomain}/mentor-setup/${payload}`;
+            return sendMentorInviteEmail(mentor.email.trim(), mentor.name.trim(), combinedGroupNames, setupUrl);
+          }
+        });
+
+        try {
+          await Promise.all(emailPromises);
+
+          let successMsg = `Invitations/notifications dispatched to ${mentorsToSend.length} unique mentor(s)!`;
+          if (skippedCount > 0) {
+            successMsg += ` (${skippedCount} active group assignments skipped).`;
+          }
+          if (missingGroups.length > 0) {
+            successMsg += ` Notice: ${missingGroups.length} group(s) pending details (${missingGroups.map(g => g.group_name).join(', ')}).`;
+          }
+
+          res.status(200).json({ 
+            success: true, 
+            newlySentCount: mentorsToSend.length,
+            skippedCount: skippedCount,
+            pendingGroupsCount: missingGroups.length,
+            message: successMsg
+          });
+        } catch (mailErr) {
+          console.error("Error dispatching emails through SMTP Relay:", mailErr.message);
+          res.status(500).json({ error: "Failed to broadcast some onboarding emails." });
+        }
+      });
+    } catch (error) {
+      console.error("Error processing send-invites:", error.message);
+      res.status(500).json({ error: "Failed to process mentor invitations." });
+    }
+  });
 });
 
 // 3. FIRST TIME PASSWORD SETTINGS & DB INSERTION / UPDATE
@@ -91,9 +309,11 @@ router.post('/finalize-setup', async (req, res) => {
 
   try {
     const rawData = Buffer.from(token, 'base64').toString('utf-8');
-    const { email, name, phone, groupId, academicUnit, level } = JSON.parse(rawData);
+    const { email, name, phone, company, groupId, groupIds, academicUnit, level } = JSON.parse(rawData);
     const targetLevel = level || 1;
-    const targetGroupId = groupId ? Number(groupId) : null;
+    const targetGroupIds = Array.isArray(groupIds) && groupIds.length > 0 
+      ? groupIds.map(Number).filter(Boolean)
+      : (groupId ? [Number(groupId)] : []);
     const mentorFullName = (name && name.trim()) ? name.trim() : username;
 
     // Hash password with bcrypt
@@ -104,14 +324,39 @@ router.post('/finalize-setup', async (req, res) => {
       if (err) return res.status(500).json({ error: "Database error during duplicate checks." });
 
       const handleGroupLink = (userId) => {
-        if (targetGroupId) {
-          db.query("UPDATE project_groups SET mentor_id = ? WHERE id = ?", [userId, targetGroupId], (updateErr) => {
-            if (updateErr) console.error("Warning: Could not link mentor_id in project_groups:", updateErr);
-            return res.status(200).json({ success: true, message: "Account setup complete!" });
-          });
-        } else {
+        if (targetGroupIds.length === 0) {
           return res.status(200).json({ success: true, message: "Account setup complete!" });
         }
+
+        let completed = 0;
+        targetGroupIds.forEach((tGroupId) => {
+          // 1. Link in multi-mentor junction table (project_group_mentors) with company
+          db.query(
+            "INSERT INTO project_group_mentors (group_id, mentor_id, company) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE company = VALUES(company)",
+            [tGroupId, userId, company || null],
+            (junctionErr) => {
+              if (junctionErr) {
+                // Fallback if company column is not yet added to project_group_mentors
+                db.query(
+                  "INSERT IGNORE INTO project_group_mentors (group_id, mentor_id) VALUES (?, ?)",
+                  [tGroupId, userId],
+                  (fbErr) => {
+                    if (fbErr) console.warn("Warning inserting into project_group_mentors:", fbErr.message);
+                  }
+                );
+              }
+
+              // 2. Also keep project_groups.mentor_id updated as primary/fallback
+              db.query("UPDATE project_groups SET mentor_id = ? WHERE id = ?", [userId, tGroupId], (updateErr) => {
+                if (updateErr) console.error("Warning: Could not link mentor_id in project_groups:", updateErr);
+                completed++;
+                if (completed === targetGroupIds.length) {
+                  return res.status(200).json({ success: true, message: "Account setup complete!" });
+                }
+              });
+            }
+          );
+        });
       };
 
       if (users.length > 0) {
@@ -123,7 +368,7 @@ router.post('/finalize-setup', async (req, res) => {
           handleGroupLink(userId);
         });
       } else {
-        // Insert new mentor with is_verified = 1
+        // Insert new mentor with standard user fields (leaving other roles untouched)
         const insertUserSql = `
           INSERT INTO users (name, email, phone, password, role, academic_unit, level, designation, is_verified) 
           VALUES (?, ?, ?, ?, 'mentor', ?, ?, NULL, 1)
@@ -147,33 +392,292 @@ router.post('/finalize-setup', async (req, res) => {
 const deleteMentorHandler = (req, res) => {
   const mentorId = req.params.id;
 
-  // Step A: Set mentor_id to NULL in project_groups so no orphan IDs remain
-  const unassignSql = `UPDATE project_groups SET mentor_id = NULL WHERE mentor_id = ?`;
+  // Step A1: Clear from project_group_mentors junction table
+  db.query(`DELETE FROM project_group_mentors WHERE mentor_id = ?`, [mentorId], (jErr) => {
+    if (jErr) console.warn("Warning clearing project_group_mentors:", jErr.message);
 
-  db.query(unassignSql, [mentorId], (err) => {
-    if (err) {
-      console.error("Error unassigning mentor from project groups:", err);
-      return res.status(500).json({ error: "Failed to update project group assignments." });
-    }
+    // Step A2: Update project_groups.mentor_id to any remaining mentor (or NULL if none left)
+    const syncSql = `
+      UPDATE project_groups pg
+      SET pg.mentor_id = (
+        SELECT pgm.mentor_id 
+        FROM project_group_mentors pgm 
+        WHERE pgm.group_id = pg.id 
+        ORDER BY pgm.id ASC 
+        LIMIT 1
+      )
+      WHERE pg.mentor_id = ?;
+    `;
 
-    // Step B: Safely delete the mentor user from users table
-    const deleteSql = `DELETE FROM users WHERE id = ? AND role = 'mentor'`;
-    db.query(deleteSql, [mentorId], (err, result) => {
+    db.query(syncSql, [mentorId], (err) => {
       if (err) {
-        console.error("Error deleting mentor:", err);
-        return res.status(500).json({ error: "Failed to delete mentor from database." });
+        console.error("Error unassigning mentor from project groups:", err);
+        return res.status(500).json({ error: "Failed to update project group assignments." });
       }
 
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: "Mentor not found." });
-      }
+      // Step B: Safely delete the mentor user from users table
+      const deleteSql = `DELETE FROM users WHERE id = ? AND role = 'mentor'`;
+      db.query(deleteSql, [mentorId], (delErr, result) => {
+        if (delErr) {
+          console.error("Error deleting mentor:", delErr);
+          return res.status(500).json({ error: "Failed to delete mentor from database." });
+        }
 
-      res.status(200).json({ success: true, message: "Mentor deleted and group assignment cleared successfully." });
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ error: "Mentor not found." });
+        }
+
+        res.status(200).json({ success: true, message: "Mentor deleted and group assignment cleared successfully." });
+      });
     });
   });
 };
 
 router.delete('/mentors/:id', deleteMentorHandler);
 router.delete('/:id', deleteMentorHandler);
+
+// 7. REASSIGN / CHANGE MENTOR FOR A SPECIFIC PROJECT GROUP
+router.post('/reassign-group-mentor', async (req, res) => {
+  const { 
+    groupId, 
+    groupName, 
+    level, 
+    academicUnit, 
+    oldMentorId,
+    oldMentorName, 
+    oldMentorEmail, 
+    sendAppreciation = true,
+    newMentorName, 
+    newMentorEmail, 
+    newMentorCompany, 
+    newMentorPhone 
+  } = req.body;
+
+  if (!groupId || !newMentorName || !newMentorEmail) {
+    return res.status(400).json({ success: false, error: "Group ID, new mentor name, and new mentor email are required." });
+  }
+
+  const targetGroupId = Number(groupId);
+  const targetLevel = Number(level) || 1;
+  const targetAcademicUnit = academicUnit || 'ITM';
+
+  try {
+    // 1. If requested and old mentor email exists, dispatch appreciation / transition email to THAT specific mentor
+    if (sendAppreciation && oldMentorEmail && oldMentorEmail.trim()) {
+      try {
+        await sendMentorOffboardingAppreciationEmail(
+          oldMentorEmail.trim(), 
+          oldMentorName || 'Industry Mentor', 
+          groupName || `Group ${groupId}`
+        );
+      } catch (emailErr) {
+        console.warn("Warning: Could not send offboarding appreciation email:", emailErr.message);
+      }
+    }
+
+    // 2. Identify the specific mentor ID to unlink & retrieve phone/company from DB
+    const executeUnlink = (specificMentorId) => {
+      const deleteJunctionSql = specificMentorId 
+        ? `DELETE FROM project_group_mentors WHERE group_id = ? AND mentor_id = ?`
+        : `DELETE FROM project_group_mentors WHERE group_id = ?`;
+      const deleteParams = specificMentorId ? [targetGroupId, specificMentorId] : [targetGroupId];
+
+      db.query(deleteJunctionSql, deleteParams, (junctionErr) => {
+        if (junctionErr) console.warn("Warning deleting from project_group_mentors:", junctionErr.message);
+
+        // Update project_groups.mentor_id with remaining active mentor from project_group_mentors (or NULL if none left)
+        db.query(`SELECT mentor_id FROM project_group_mentors WHERE group_id = ? ORDER BY id ASC LIMIT 1`, [targetGroupId], (selectErr, remaining) => {
+          const nextMentorId = (remaining && remaining.length > 0) ? remaining[0].mentor_id : null;
+          
+          const updatePgSql = `UPDATE project_groups SET mentor_id = ? WHERE id = ?`;
+          const updatePgParams = [nextMentorId, targetGroupId];
+
+          db.query(updatePgSql, updatePgParams, async (pgErr) => {
+            if (pgErr) console.warn("Warning updating project_groups.mentor_id:", pgErr.message);
+
+            const frontendDomain = process.env.FRONTEND_URL || 'http://localhost:5173';
+            const cleanNewEmail = newMentorEmail.trim().toLowerCase();
+
+            // Check if the new mentor is already registered and verified
+            db.query("SELECT id, name, email, is_verified FROM users WHERE LOWER(TRIM(email)) = ? AND is_verified = 1 LIMIT 1", [cleanNewEmail], async (findNewErr, activeNewRows) => {
+              const existingActiveMentor = (activeNewRows && activeNewRows.length > 0) ? activeNewRows[0] : null;
+
+              if (existingActiveMentor) {
+                // Auto-link new group to existing active mentor
+                const userId = existingActiveMentor.id;
+                db.query(
+                  "INSERT INTO project_group_mentors (group_id, mentor_id, company) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE company = VALUES(company)",
+                  [targetGroupId, userId, newMentorCompany ? newMentorCompany.trim() : null],
+                  (jErr) => {
+                    if (jErr) {
+                      db.query(
+                        "INSERT IGNORE INTO project_group_mentors (group_id, mentor_id) VALUES (?, ?)",
+                        [targetGroupId, userId],
+                        () => {}
+                      );
+                    }
+                    db.query("UPDATE project_groups SET mentor_id = ? WHERE id = ?", [userId, targetGroupId], async () => {
+                      const loginUrl = `${frontendDomain}/login`;
+                      try {
+                        await sendMentorNewGroupAssignmentEmail(
+                          newMentorEmail.trim(),
+                          newMentorName.trim() || existingActiveMentor.name,
+                          groupName || `Group ${groupId}`,
+                          loginUrl
+                        );
+                        res.status(200).json({ 
+                          success: true, 
+                          message: `Mentor reassigned successfully! Assignment notification dispatched to ${newMentorName} (${newMentorEmail}).` 
+                        });
+                      } catch (emailErr) {
+                        console.error("Error sending mentor assignment email:", emailErr);
+                        res.status(500).json({ success: false, error: "Failed to send assignment notification to the mentor." });
+                      }
+                    });
+                  }
+                );
+              } else {
+                // Brand new mentor — send setup invite token
+                const payload = Buffer.from(JSON.stringify({
+                  email: newMentorEmail.trim(),
+                  name: newMentorName.trim(),
+                  phone: newMentorPhone ? newMentorPhone.trim() : null,
+                  company: newMentorCompany ? newMentorCompany.trim() : null,
+                  groupId: targetGroupId,
+                  academicUnit: targetAcademicUnit,
+                  level: targetLevel 
+                })).toString('base64');
+
+                const setupUrl = `${frontendDomain}/mentor-setup/${payload}`;
+
+                try {
+                  await sendMentorInviteEmail(
+                    newMentorEmail.trim(), 
+                    newMentorName.trim(), 
+                    groupName || `Group ${groupId}`, 
+                    setupUrl
+                  );
+
+                  res.status(200).json({ 
+                    success: true, 
+                    message: `Mentor reassigned successfully! Setup invitation dispatched to ${newMentorName} (${newMentorEmail}).` 
+                  });
+                } catch (inviteErr) {
+                  console.error("Error sending new mentor invite email:", inviteErr.message);
+                  res.status(500).json({ success: false, error: "Failed to send onboarding invite to the new mentor." });
+                }
+              }
+            });
+          });
+        });
+      });
+    };
+
+    const proceedWithMentorDetails = (mentorUserId, mentorUserRow = null) => {
+      const mentorFullName = oldMentorName || mentorUserRow?.name || 'Industry Mentor';
+      const mentorEmailAddress = oldMentorEmail || mentorUserRow?.email || '';
+      const mentorPhone = req.body.oldMentorPhone || mentorUserRow?.phone || null;
+      const adminId = req.body.reassignedBy || null;
+
+      // Look up mentor company from project_group_mentors table
+      db.query(
+        `SELECT company FROM project_group_mentors WHERE group_id = ? AND (mentor_id = ? OR mentor_id IS NULL) LIMIT 1`,
+        [targetGroupId, mentorUserId],
+        (pgmErr, pgmRows) => {
+          const pgmCompany = (pgmRows && pgmRows.length > 0 && pgmRows[0].company) ? pgmRows[0].company : null;
+          const mentorCompany = req.body.oldMentorCompany || pgmCompany || null;
+
+          // 2a. Archive unlinked mentor details into mentor_assignment_history
+          if (mentorFullName || mentorEmailAddress) {
+            const historyInsertSql = `
+              INSERT INTO mentor_assignment_history 
+              (group_id, group_name, level, academic_unit, mentor_id, mentor_name, mentor_email, mentor_phone, mentor_company, new_mentor_name, new_mentor_email, reassigned_by, reassigned_reason, unassigned_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            `;
+            const historyParams = [
+              targetGroupId,
+              groupName || `Group ${groupId}`,
+              targetLevel,
+              targetAcademicUnit,
+              mentorUserId || null,
+              mentorFullName,
+              mentorEmailAddress,
+              mentorPhone,
+              mentorCompany,
+              newMentorName.trim(),
+              newMentorEmail.trim(),
+              adminId,
+              'Reassigned / Changed by Administrator'
+            ];
+
+            db.query(historyInsertSql, historyParams, (histErr) => {
+              if (histErr) console.warn("Warning recording mentor history log:", histErr.message);
+            });
+          }
+
+          executeUnlink(mentorUserId);
+        }
+      );
+    };
+
+    if (oldMentorId) {
+      db.query(`SELECT id, name, email, phone FROM users WHERE id = ? LIMIT 1`, [Number(oldMentorId)], (findErr, userRows) => {
+        const foundRow = (userRows && userRows.length > 0) ? userRows[0] : null;
+        proceedWithMentorDetails(Number(oldMentorId), foundRow);
+      });
+    } else if (oldMentorEmail && oldMentorEmail.trim()) {
+      db.query(`SELECT id, name, email, phone FROM users WHERE LOWER(TRIM(email)) = ? LIMIT 1`, [oldMentorEmail.trim().toLowerCase()], (findErr, userRows) => {
+        const foundRow = (userRows && userRows.length > 0) ? userRows[0] : null;
+        const foundId = foundRow ? foundRow.id : null;
+        proceedWithMentorDetails(foundId, foundRow);
+      });
+    } else {
+      proceedWithMentorDetails(null, null);
+    }
+
+  } catch (error) {
+    console.error("Error in reassign-group-mentor:", error);
+    res.status(500).json({ success: false, error: "Server error during mentor reassignment." });
+  }
+});
+
+// 8. GET MENTOR REASSIGNMENT HISTORY FOR A LEVEL
+router.get('/history/level/:level', (req, res) => {
+  const level = Number(req.params.level) || 1;
+  const groupId = req.query.groupId ? Number(req.query.groupId) : null;
+
+  let query = `
+    SELECT 
+      mah.*, 
+      u.name AS reassigned_by_name,
+      u.email AS reassigned_by_email
+    FROM mentor_assignment_history mah
+    LEFT JOIN users u ON mah.reassigned_by = u.id
+    WHERE mah.level = ?
+  `;
+  let params = [level];
+
+  if (groupId) {
+    query += ` AND mah.group_id = ?`;
+    params.push(groupId);
+  }
+
+  query += ` ORDER BY mah.unassigned_at DESC`;
+
+  db.query(query, params, (err, rows) => {
+    if (err) {
+      console.warn("Warning fetching mentor history with JOIN:", err.message);
+      db.query(`SELECT * FROM mentor_assignment_history WHERE level = ? ORDER BY unassigned_at DESC`, [level], (fbErr, fbRows) => {
+        if (fbErr) {
+          console.warn("Fallback query failed:", fbErr.message);
+          return res.status(200).json({ success: true, history: [] });
+        }
+        return res.status(200).json({ success: true, history: fbRows || [] });
+      });
+      return;
+    }
+    return res.status(200).json({ success: true, history: rows || [] });
+  });
+});
 
 module.exports = router;

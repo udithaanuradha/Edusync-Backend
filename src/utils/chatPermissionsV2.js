@@ -52,33 +52,41 @@ const getUserRoleInfo = async (userId) => {
 };
 
 /**
- * Distinct supervisor_id / mentor_id across every project group this
- * student belongs to. Same join used in GroupConversationV2Model's
- * getUserProjectGroups.
+ * Distinct supervisor_id(s) / mentor_id across every project group this
+ * student belongs to — includes supervisor_id_2, so a group's second
+ * supervisor is just as reachable as the first. Same join used in
+ * GroupConversationV2Model's getUserProjectGroups.
  */
 const getAssignedSupervisorAndMentorIds = async (studentId) => {
   const [rows] = await dbPromise.query(
-    `SELECT DISTINCT pg.supervisor_id, pg.mentor_id
+    `SELECT DISTINCT pg.supervisor_id, pg.supervisor_id_2, pg.mentor_id
      FROM project_groups pg
      JOIN project_group_members gm ON gm.group_id = pg.id
      WHERE gm.student_id = ?`,
     [studentId]
   );
   return {
-    supervisorIds: rows.map((r) => r.supervisor_id).filter((id) => id != null),
+    supervisorIds: [
+      ...new Set(
+        rows.flatMap((r) => [r.supervisor_id, r.supervisor_id_2]).filter((id) => id != null)
+      ),
+    ],
     mentorIds: rows.map((r) => r.mentor_id).filter((id) => id != null),
   };
 };
 
-/** Inverse of the above — students in groups where supervisor_id/mentor_id = staffId. */
+/** Inverse of the above — students in groups where supervisor_id/supervisor_id_2/mentor_id = staffId. */
 const getAssignedStudentIds = async (staffId, type) => {
-  const column = type === 'mentor' ? 'mentor_id' : 'supervisor_id';
+  const condition = type === 'mentor'
+    ? 'pg.mentor_id = ?'
+    : 'pg.supervisor_id = ? OR pg.supervisor_id_2 = ?';
+  const params = type === 'mentor' ? [staffId] : [staffId, staffId];
   const [rows] = await dbPromise.query(
     `SELECT DISTINCT gm.student_id
      FROM project_groups pg
      JOIN project_group_members gm ON gm.group_id = pg.id
-     WHERE pg.${column} = ?`,
-    [staffId]
+     WHERE ${condition}`,
+    params
   );
   return rows.map((r) => r.student_id);
 };

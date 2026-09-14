@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { ensureEvaluationPanelStatusColumn } = require('./calendarController');
 
 const toNumber = (value) => {
   const parsed = Number(value);
@@ -15,8 +16,41 @@ const projectGroupsHasCreatedBy = async () => {
   }
 };
 
+// Students choose a degree program from {AI, IT, ITM} at signup; lecturers
+// and coordinators choose a department from {IT, IDS, CM} — for the same
+// real-world program these are different raw codes (IDS==ITM, CM==AI; same
+// mapping already used by calendarController.js and userController.js).
+const normalizeAcademicUnit = (unit) => {
+  const clean = String(unit || '').trim().toUpperCase();
+  if (clean === 'IDS' || clean === 'ITM') return 'ITM';
+  if (clean === 'CM' || clean === 'AI') return 'AI';
+  if (clean === 'IT') return 'IT';
+  return clean || null;
+};
+
+// Resolves the coordinator's own department + level straight from their own
+// users row, the same way calendarController.js's getCoordinatorScope and
+// userController.js's getStudentsByLevel do — never trusts either value
+// from the client directly.
+const getCoordinatorScope = async (coordinatorId) => {
+  if (!coordinatorId) return null;
+  try {
+    const [rows] = await db.promise().query('SELECT academic_unit, level FROM users WHERE id = ?', [coordinatorId]);
+    if (rows.length === 0) return null;
+    return {
+      department: normalizeAcademicUnit(rows[0].academic_unit),
+      level: rows[0].level != null ? Number(rows[0].level) : null,
+    };
+  } catch (error) {
+    console.warn('getCoordinatorScope lookup failed in dashboard controller:', error.message);
+    return null;
+  }
+};
+
 const getCoordinatorSummary = async (req, res) => {
   try {
+    await ensureEvaluationPanelStatusColumn();
+
     // Extract coordinatorId from query parameters
     const coordinatorId = req.query.coordinatorId;
 
@@ -34,11 +68,38 @@ const getCoordinatorSummary = async (req, res) => {
       ${projectGroupCoordinatorFilter}
     `;
 
-    const activeStudentsQuery = `
-      SELECT COUNT(*) AS activeStudents
-      FROM users
-      WHERE role = 'student'
-    `;
+    // Previously unscoped ("every student in the whole system, every
+    // department, every level"), so this card showed the exact same number
+    // for every coordinator regardless of who was logged in. Now matched to
+    // the coordinator's own department + level, same as the "add member"
+    // student search (userController.js's getStudentsByLevel) already is —
+    // a coordinator's dashboard should only count the students they could
+    // actually put in one of their own groups.
+    const coordinatorScope = hasCoordinatorFilter ? await getCoordinatorScope(coordinatorId) : null;
+
+    const activeStudentsQuery = coordinatorScope
+      ? `
+        SELECT COUNT(*) AS activeStudents
+        FROM users
+        WHERE role = 'student'
+          AND level = ?
+          AND (? IS NULL OR
+               CASE
+                 WHEN UPPER(TRIM(academic_unit)) IN ('IDS', 'ITM') THEN 'ITM'
+                 WHEN UPPER(TRIM(academic_unit)) IN ('CM', 'AI') THEN 'AI'
+                 WHEN UPPER(TRIM(academic_unit)) = 'IT' THEN 'IT'
+                 ELSE UPPER(TRIM(academic_unit))
+               END = ?)
+      `
+      : `
+        SELECT COUNT(*) AS activeStudents
+        FROM users
+        WHERE role = 'student'
+      `;
+
+    const activeStudentsParams = coordinatorScope
+      ? [coordinatorScope.level, coordinatorScope.department, coordinatorScope.department]
+      : [];
 
     // A panel's evaluation_type ('Proposal'/'Code Review'/...) is matched to
     // project_stages by name WITHIN THE PANEL'S OWN academic_level — the
@@ -71,20 +132,27 @@ const getCoordinatorSummary = async (req, res) => {
     // coordinator system-wide (e.g. 11, when a group's own level realistically
     // has 3-4), making "fully evaluated" nearly unreachable and the progress
     // percentage meaningless.
-    // A project is "Completed" once its FINAL stage has been evaluated —
-    // matches the same rule already applied to Calendar panel completion
-    // (the whole evaluation cycle ends at Final, not per-stage). This is
-    // also more robust than counting "all stages marked": a stage that was
-    // later replaced/recreated can leave old marks rows with a NULL
-    // stage_id (no FK match any more), which silently undercounts a
-    // marked-every-stage check but never affects a Final-specific one,
-    // since Final's own marks still carry a valid stage_id.
+    // A project is "Completed" once its FINAL panel is officially marked
+    // complete by the coordinator — NOT merely once evaluators have
+    // submitted marks for it. Those are different moments: marks can exist
+    // for the Final stage the instant an evaluator finishes scoring, well
+    // before the coordinator has clicked "Complete" on the Reports tab
+    // (calendarController's completePanelsForGroups, which is what actually
+    // flips evaluation_panels.status to 'completed'). The dashboard
+    // previously used "any marks exist for a stage named final" as its
+    // completion signal, which showed a group as 100%/Completed the moment
+    // marks landed — even with every one of its panels still 'scheduled'.
+    // This now matches the same evaluation_panels.status check
+    // marksController's finalReleasedGroups and the Calendar's "Complete"
+    // button already use as the single source of truth for "is this group
+    // actually done".
     const finalStageMarkedSubquery = `
       EXISTS (
-        SELECT 1 FROM marks m
-        JOIN project_stages ps ON ps.stage_id = m.stage_id
-        WHERE m.group_id = pg.id AND ps.level = pg.level
-          AND LOWER(TRIM(ps.stage_name)) = 'final'
+        SELECT 1 FROM evaluation_panels ep
+        WHERE LOWER(TRIM(ep.target_group)) = LOWER(TRIM(pg.group_name))
+          AND ep.academic_level = pg.level
+          AND LOWER(TRIM(ep.evaluation_type)) = 'final'
+          AND LOWER(TRIM(ep.status)) = 'completed'
       )
     `;
 
@@ -100,6 +168,7 @@ const getCoordinatorSummary = async (req, res) => {
         pg.id AS projectId,
         pg.group_name AS groupName,
         COALESCE(u.name, 'Unassigned') AS supervisorName,
+        u2.name AS supervisorName2,
         CASE
           WHEN ${finalStageMarkedSubquery} THEN 'Completed'
           WHEN COALESCE(progress.marked_count, 0) > 0 THEN 'In Progress'
@@ -113,6 +182,7 @@ const getCoordinatorSummary = async (req, res) => {
         COALESCE(progress.last_activity, pg.created_at) AS updatedAt
       FROM project_groups pg
       LEFT JOIN users u ON u.id = pg.supervisor_id
+      LEFT JOIN users u2 ON u2.id = pg.supervisor_id_2
       LEFT JOIN (
         SELECT
           m.group_id,
@@ -134,6 +204,14 @@ const getCoordinatorSummary = async (req, res) => {
     // has no relationship to whether a given group's panel is done, so it
     // kept "upcoming" stale long after a group's panels were marked
     // completed on the Calendar.
+    // marksSubmitted panels are excluded via NOT EXISTS in the WHERE clause,
+    // not filtered client-side after the fact — this endpoint only has one
+    // consumer (CoordinatorDashboard.tsx, always with pendingOnly), and the
+    // old approach applied LIMIT 3 to the raw panel list *before* excluding
+    // already-marked ones, so a genuinely pending panel could get silently
+    // pushed out of the top 3 by earlier panels that no longer needed the
+    // coordinator's attention at all. Filtering here means LIMIT 3 only ever
+    // spends its budget on panels that still belong on this widget.
     const upcomingDeadlinesQuery = `
       SELECT
         ep.id AS id,
@@ -142,11 +220,18 @@ const getCoordinatorSummary = async (req, res) => {
         ep.academic_level AS academicLevel,
         ep.start_time AS startTime,
         ep.target_group AS targetGroup,
-        ep.location AS location
+        ep.location AS location,
+        0 AS marksSubmitted
       FROM evaluation_panels ep
-      LEFT JOIN project_groups pg ON pg.group_name = ep.target_group
+      LEFT JOIN project_groups pg ON pg.group_name = ep.target_group AND pg.level = ep.academic_level
       WHERE ep.panel_date >= CURDATE()
         AND ep.status != 'completed'
+        AND NOT EXISTS (
+          SELECT 1 FROM marks m
+          JOIN project_stages ps ON ps.stage_id = m.stage_id
+          WHERE m.group_id = pg.id
+            AND LOWER(TRIM(ps.stage_name)) = LOWER(TRIM(ep.evaluation_type))
+        )
         ${supportsCoordinatorTracking && hasCoordinatorFilter ? 'AND pg.created_by = ?' : ''}
       ORDER BY ep.panel_date ASC, ep.start_time ASC
       LIMIT 3
@@ -168,7 +253,7 @@ const getCoordinatorSummary = async (req, res) => {
       [upcomingDeadlinesRows],
     ] = await Promise.all([
       db.promise().query(totalProjectsQuery, totalProjectsParams),
-      db.promise().query(activeStudentsQuery),
+      db.promise().query(activeStudentsQuery, activeStudentsParams),
       db.promise().query(pendingEvaluationsQuery, pendingEvaluationsParams),
       db.promise().query(completedProjectsQuery, completedProjectsParams),
       db.promise().query(recentProjectsQuery, recentProjectsParams),
@@ -187,6 +272,7 @@ const getCoordinatorSummary = async (req, res) => {
           projectId: row.projectId,
           groupName: row.groupName,
           supervisorName: row.supervisorName,
+          supervisorName2: row.supervisorName2 || null,
           status: row.status,
           progress: toNumber(row.progress),
           updatedAt: row.updatedAt,
@@ -202,6 +288,7 @@ const getCoordinatorSummary = async (req, res) => {
           startTime: row.startTime,
           targetGroup: row.targetGroup,
           location: row.location,
+          marksSubmitted: Boolean(Number(row.marksSubmitted ?? 0)),
         }))
       : [];
 
@@ -261,49 +348,16 @@ const getStudentSummary = async (req, res) => {
       LIMIT 4
     `;
 
-    const upcomingDeadlinesQuery = `
-      (
-        SELECT
-          ps.stage_id AS id,
-          COALESCE(ps.deadline, CURDATE()) AS date,
-          ps.stage_name AS title,
-          NULL AS academicLevel,
-          NULL AS startTime,
-          'Project Stage' AS targetGroup,
-          NULL AS location
-        FROM project_stages ps
-        WHERE ps.deadline IS NOT NULL
-          AND ps.deadline >= CURDATE()
-      )
-      UNION ALL
-      (
-        SELECT
-          t.id AS id,
-          COALESCE(t.due_date, CURDATE()) AS date,
-          t.task_name AS title,
-          NULL AS academicLevel,
-          NULL AS startTime,
-          'Personal Task' AS targetGroup,
-          NULL AS location
-        FROM student_tasks t
-        JOIN milestones m ON t.milestone_id = m.id
-        WHERE t.assigned_to = ?
-          AND t.due_date IS NOT NULL
-          AND t.due_date >= CURDATE()
-          AND t.status != 'COMPLETED'
-      )
-      ORDER BY date ASC
-      LIMIT 5
-    `;
-
     // The student's own active group — students can only ever belong to one
     // live group at a time (see groupController.js's already-grouped-member
     // checks), so there's no real "which project" ambiguity to resolve here.
     // Ordered the same way recentProjectsQuery above is, so if a stale extra
     // group row ever exists the summary cards below stay scoped to the same
-    // project "Recent Projects" surfaces first.
+    // project "Recent Projects" surfaces first. Resolved BEFORE
+    // upcomingDeadlinesQuery below, which needs this group's level to scope
+    // its "Project Stage" half.
     const activeGroupQuery = `
-      SELECT pg.id AS groupId
+      SELECT pg.id AS groupId, pg.level AS groupLevel
       FROM project_groups pg
       JOIN project_group_members gm ON gm.group_id = pg.id
       LEFT JOIN (
@@ -315,14 +369,68 @@ const getStudentSummary = async (req, res) => {
       LIMIT 1
     `;
 
+    const [activeGroupRows] = await db.promise().query(activeGroupQuery, [studentId]);
+    const activeGroupLevelForDeadlines = activeGroupRows?.[0]?.groupLevel ?? null;
+
+    // project_stages is a shared per-level TEMPLATE (every group at a level
+    // works toward the same stage deadlines) — it previously had no `level`
+    // filter at all, so this "Upcoming Panels" card on the student dashboard
+    // showed the exact same Interim/Final deadlines to literally every
+    // student system-wide, including one with no group (and therefore no
+    // project stage to work toward) yet. `ps.level = ?` with
+    // activeGroupLevelForDeadlines as NULL when the student has no group
+    // correctly matches zero rows (MySQL never matches `= NULL`), so a
+    // groupless student now sees no stage deadlines here either.
+    //
+    // Kept as two separate queries (rather than one UNION ALL) so the
+    // "Upcoming Panels" card can show only real panel/stage deadlines while
+    // a separate "Student Tasks" card shows the student's own personal
+    // tasks — each gets its own LIMIT 5 instead of the two types competing
+    // for slots in one combined top-5.
+    const upcomingPanelsQuery = `
+      SELECT
+        ps.stage_id AS id,
+        COALESCE(ps.deadline, CURDATE()) AS date,
+        ps.stage_name AS title,
+        NULL AS academicLevel,
+        NULL AS startTime,
+        'Project Stage' AS targetGroup,
+        NULL AS location
+      FROM project_stages ps
+      WHERE ps.deadline IS NOT NULL
+        AND ps.deadline >= CURDATE()
+        AND ps.level = ?
+      ORDER BY date ASC
+      LIMIT 5
+    `;
+
+    const studentTasksQuery = `
+      SELECT
+        t.id AS id,
+        COALESCE(t.due_date, CURDATE()) AS date,
+        t.task_name AS title,
+        NULL AS academicLevel,
+        NULL AS startTime,
+        'Personal Task' AS targetGroup,
+        NULL AS location
+      FROM student_tasks t
+      JOIN milestones m ON t.milestone_id = m.id
+      WHERE t.assigned_to = ?
+        AND t.due_date IS NOT NULL
+        AND t.due_date >= CURDATE()
+        AND t.status != 'COMPLETED'
+      ORDER BY date ASC
+      LIMIT 5
+    `;
+
     const [
       [recentProjectsRows],
-      [upcomingDeadlinesRows],
-      [activeGroupRows],
+      [upcomingPanelsRows],
+      [studentTasksRows],
     ] = await Promise.all([
       db.promise().query(recentProjectsQuery, [studentId]),
-      db.promise().query(upcomingDeadlinesQuery, [studentId]),
-      db.promise().query(activeGroupQuery, [studentId]),
+      db.promise().query(upcomingPanelsQuery, [activeGroupLevelForDeadlines]),
+      db.promise().query(studentTasksQuery, [studentId]),
     ]);
 
     const recentProjects = Array.isArray(recentProjectsRows)
@@ -336,17 +444,25 @@ const getStudentSummary = async (req, res) => {
         }))
       : [];
 
-    const upcomingDeadlines = Array.isArray(upcomingDeadlinesRows)
-      ? upcomingDeadlinesRows.map((row) => ({
-          id: row.id,
-          date: row.date,
-          title: row.title,
-          academicLevel: toNumber(row.academicLevel),
-          startTime: row.startTime,
-          targetGroup: row.targetGroup,
-          location: row.location,
-        }))
-      : [];
+    const mapDeadlineRow = (row) => ({
+      id: row.id,
+      date: row.date,
+      title: row.title,
+      academicLevel: toNumber(row.academicLevel),
+      startTime: row.startTime,
+      targetGroup: row.targetGroup,
+      location: row.location,
+    });
+
+    const upcomingPanels = Array.isArray(upcomingPanelsRows) ? upcomingPanelsRows.map(mapDeadlineRow) : [];
+    const studentTasks = Array.isArray(studentTasksRows) ? studentTasksRows.map(mapDeadlineRow) : [];
+
+    // Combined, date-sorted view kept for the "Deadline" stat card below,
+    // which wants the single soonest item regardless of whether it's a
+    // panel or a personal task.
+    const upcomingDeadlines = [...upcomingPanels, ...studentTasks].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
 
     // Dashboard Overview's 5 summary cards (MyProjectStatus.tsx). Scoped to
     // the same active group as everything above — Completion and Tasks Done
@@ -367,6 +483,13 @@ const getStudentSummary = async (req, res) => {
     };
 
     if (activeGroupId) {
+      // Completion/Tasks Done/Delayed are scoped to THIS student's own
+      // assigned tasks (t.assigned_to = studentId), not the whole group's
+      // task board — otherwise every member of a group sees identical
+      // numbers on their own dashboard, which reads as "my project status"
+      // but isn't actually personal. Same convention as MyProgress.tsx's
+      // "own tasks only" personal rollup. Members stays group-wide since
+      // team size isn't a per-student figure.
       const [
         [taskStatsRows],
         [delayedRows],
@@ -378,18 +501,20 @@ const getStudentSummary = async (req, res) => {
              SUM(CASE WHEN UPPER(TRIM(t.status)) = 'COMPLETED' THEN 1 ELSE 0 END) AS completedTasksCount
            FROM student_tasks t
            JOIN milestones m ON t.milestone_id = m.id
-           WHERE m.group_id = ?`,
-          [activeGroupId]
+           WHERE m.group_id = ?
+             AND t.assigned_to = ?`,
+          [activeGroupId, studentId]
         ),
         db.promise().query(
           `SELECT COUNT(*) AS delayedCount
            FROM student_tasks t
            JOIN milestones m ON t.milestone_id = m.id
            WHERE m.group_id = ?
+             AND t.assigned_to = ?
              AND UPPER(TRIM(t.status)) != 'COMPLETED'
              AND t.due_date IS NOT NULL
              AND t.due_date < CURRENT_DATE`,
-          [activeGroupId]
+          [activeGroupId, studentId]
         ),
         db.promise().query(
           `SELECT COUNT(*) AS membersCount FROM project_group_members WHERE group_id = ?`,
@@ -416,6 +541,8 @@ const getStudentSummary = async (req, res) => {
       data: {
         recentProjects,
         upcomingDeadlines,
+        upcomingPanels,
+        studentTasks,
         stats: { ...stats, nearestDeadline },
       },
     });
