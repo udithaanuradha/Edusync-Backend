@@ -348,49 +348,16 @@ const getStudentSummary = async (req, res) => {
       LIMIT 4
     `;
 
-    const upcomingDeadlinesQuery = `
-      (
-        SELECT
-          ps.stage_id AS id,
-          COALESCE(ps.deadline, CURDATE()) AS date,
-          ps.stage_name AS title,
-          NULL AS academicLevel,
-          NULL AS startTime,
-          'Project Stage' AS targetGroup,
-          NULL AS location
-        FROM project_stages ps
-        WHERE ps.deadline IS NOT NULL
-          AND ps.deadline >= CURDATE()
-      )
-      UNION ALL
-      (
-        SELECT
-          t.id AS id,
-          COALESCE(t.due_date, CURDATE()) AS date,
-          t.task_name AS title,
-          NULL AS academicLevel,
-          NULL AS startTime,
-          'Personal Task' AS targetGroup,
-          NULL AS location
-        FROM student_tasks t
-        JOIN milestones m ON t.milestone_id = m.id
-        WHERE t.assigned_to = ?
-          AND t.due_date IS NOT NULL
-          AND t.due_date >= CURDATE()
-          AND t.status != 'COMPLETED'
-      )
-      ORDER BY date ASC
-      LIMIT 5
-    `;
-
     // The student's own active group — students can only ever belong to one
     // live group at a time (see groupController.js's already-grouped-member
     // checks), so there's no real "which project" ambiguity to resolve here.
     // Ordered the same way recentProjectsQuery above is, so if a stale extra
     // group row ever exists the summary cards below stay scoped to the same
-    // project "Recent Projects" surfaces first.
+    // project "Recent Projects" surfaces first. Resolved BEFORE
+    // upcomingDeadlinesQuery below, which needs this group's level to scope
+    // its "Project Stage" half.
     const activeGroupQuery = `
-      SELECT pg.id AS groupId
+      SELECT pg.id AS groupId, pg.level AS groupLevel
       FROM project_groups pg
       JOIN project_group_members gm ON gm.group_id = pg.id
       LEFT JOIN (
@@ -402,14 +369,68 @@ const getStudentSummary = async (req, res) => {
       LIMIT 1
     `;
 
+    const [activeGroupRows] = await db.promise().query(activeGroupQuery, [studentId]);
+    const activeGroupLevelForDeadlines = activeGroupRows?.[0]?.groupLevel ?? null;
+
+    // project_stages is a shared per-level TEMPLATE (every group at a level
+    // works toward the same stage deadlines) — it previously had no `level`
+    // filter at all, so this "Upcoming Panels" card on the student dashboard
+    // showed the exact same Interim/Final deadlines to literally every
+    // student system-wide, including one with no group (and therefore no
+    // project stage to work toward) yet. `ps.level = ?` with
+    // activeGroupLevelForDeadlines as NULL when the student has no group
+    // correctly matches zero rows (MySQL never matches `= NULL`), so a
+    // groupless student now sees no stage deadlines here either.
+    //
+    // Kept as two separate queries (rather than one UNION ALL) so the
+    // "Upcoming Panels" card can show only real panel/stage deadlines while
+    // a separate "Student Tasks" card shows the student's own personal
+    // tasks — each gets its own LIMIT 5 instead of the two types competing
+    // for slots in one combined top-5.
+    const upcomingPanelsQuery = `
+      SELECT
+        ps.stage_id AS id,
+        COALESCE(ps.deadline, CURDATE()) AS date,
+        ps.stage_name AS title,
+        NULL AS academicLevel,
+        NULL AS startTime,
+        'Project Stage' AS targetGroup,
+        NULL AS location
+      FROM project_stages ps
+      WHERE ps.deadline IS NOT NULL
+        AND ps.deadline >= CURDATE()
+        AND ps.level = ?
+      ORDER BY date ASC
+      LIMIT 5
+    `;
+
+    const studentTasksQuery = `
+      SELECT
+        t.id AS id,
+        COALESCE(t.due_date, CURDATE()) AS date,
+        t.task_name AS title,
+        NULL AS academicLevel,
+        NULL AS startTime,
+        'Personal Task' AS targetGroup,
+        NULL AS location
+      FROM student_tasks t
+      JOIN milestones m ON t.milestone_id = m.id
+      WHERE t.assigned_to = ?
+        AND t.due_date IS NOT NULL
+        AND t.due_date >= CURDATE()
+        AND t.status != 'COMPLETED'
+      ORDER BY date ASC
+      LIMIT 5
+    `;
+
     const [
       [recentProjectsRows],
-      [upcomingDeadlinesRows],
-      [activeGroupRows],
+      [upcomingPanelsRows],
+      [studentTasksRows],
     ] = await Promise.all([
       db.promise().query(recentProjectsQuery, [studentId]),
-      db.promise().query(upcomingDeadlinesQuery, [studentId]),
-      db.promise().query(activeGroupQuery, [studentId]),
+      db.promise().query(upcomingPanelsQuery, [activeGroupLevelForDeadlines]),
+      db.promise().query(studentTasksQuery, [studentId]),
     ]);
 
     const recentProjects = Array.isArray(recentProjectsRows)
@@ -423,17 +444,25 @@ const getStudentSummary = async (req, res) => {
         }))
       : [];
 
-    const upcomingDeadlines = Array.isArray(upcomingDeadlinesRows)
-      ? upcomingDeadlinesRows.map((row) => ({
-          id: row.id,
-          date: row.date,
-          title: row.title,
-          academicLevel: toNumber(row.academicLevel),
-          startTime: row.startTime,
-          targetGroup: row.targetGroup,
-          location: row.location,
-        }))
-      : [];
+    const mapDeadlineRow = (row) => ({
+      id: row.id,
+      date: row.date,
+      title: row.title,
+      academicLevel: toNumber(row.academicLevel),
+      startTime: row.startTime,
+      targetGroup: row.targetGroup,
+      location: row.location,
+    });
+
+    const upcomingPanels = Array.isArray(upcomingPanelsRows) ? upcomingPanelsRows.map(mapDeadlineRow) : [];
+    const studentTasks = Array.isArray(studentTasksRows) ? studentTasksRows.map(mapDeadlineRow) : [];
+
+    // Combined, date-sorted view kept for the "Deadline" stat card below,
+    // which wants the single soonest item regardless of whether it's a
+    // panel or a personal task.
+    const upcomingDeadlines = [...upcomingPanels, ...studentTasks].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
 
     // Dashboard Overview's 5 summary cards (MyProjectStatus.tsx). Scoped to
     // the same active group as everything above — Completion and Tasks Done
@@ -454,6 +483,13 @@ const getStudentSummary = async (req, res) => {
     };
 
     if (activeGroupId) {
+      // Completion/Tasks Done/Delayed are scoped to THIS student's own
+      // assigned tasks (t.assigned_to = studentId), not the whole group's
+      // task board — otherwise every member of a group sees identical
+      // numbers on their own dashboard, which reads as "my project status"
+      // but isn't actually personal. Same convention as MyProgress.tsx's
+      // "own tasks only" personal rollup. Members stays group-wide since
+      // team size isn't a per-student figure.
       const [
         [taskStatsRows],
         [delayedRows],
@@ -465,18 +501,20 @@ const getStudentSummary = async (req, res) => {
              SUM(CASE WHEN UPPER(TRIM(t.status)) = 'COMPLETED' THEN 1 ELSE 0 END) AS completedTasksCount
            FROM student_tasks t
            JOIN milestones m ON t.milestone_id = m.id
-           WHERE m.group_id = ?`,
-          [activeGroupId]
+           WHERE m.group_id = ?
+             AND t.assigned_to = ?`,
+          [activeGroupId, studentId]
         ),
         db.promise().query(
           `SELECT COUNT(*) AS delayedCount
            FROM student_tasks t
            JOIN milestones m ON t.milestone_id = m.id
            WHERE m.group_id = ?
+             AND t.assigned_to = ?
              AND UPPER(TRIM(t.status)) != 'COMPLETED'
              AND t.due_date IS NOT NULL
              AND t.due_date < CURRENT_DATE`,
-          [activeGroupId]
+          [activeGroupId, studentId]
         ),
         db.promise().query(
           `SELECT COUNT(*) AS membersCount FROM project_group_members WHERE group_id = ?`,
@@ -503,6 +541,8 @@ const getStudentSummary = async (req, res) => {
       data: {
         recentProjects,
         upcomingDeadlines,
+        upcomingPanels,
+        studentTasks,
         stats: { ...stats, nearestDeadline },
       },
     });
