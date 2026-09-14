@@ -245,9 +245,13 @@ app.post('/api/verify-otp', (req, res) => {
         return res.status(400).json({ error: "Email and OTP code are required" });
     }
 
-    // 1. First look up the user by their email to find their unique user ID integer
-    const findUserSql = "SELECT id FROM users WHERE email = ?";
-    db.query(findUserSql, [email], (err, userResults) => {
+    // 1. First look up the user by their email to find their unique user ID integer.
+    // Match /api/login's LOWER(TRIM(email)) lookup — without this, a stored email
+    // that differs only in case/whitespace from what the user types would let them
+    // log in (login normalizes) but fail here, leaving a 403-unverified account
+    // with no way to complete verification.
+    const findUserSql = "SELECT id FROM users WHERE LOWER(TRIM(email)) = ?";
+    db.query(findUserSql, [email.trim().toLowerCase()], (err, userResults) => {
         if (err) return res.status(500).json({ error: "Internal server error during user lookup" });
         
         if (userResults.length === 0) {
@@ -286,9 +290,10 @@ app.post('/api/resend-otp', (req, res) => {
 
     if (!email) return res.status(400).json({ error: 'Email is required.' });
 
-    // 1. Check if the user exists
-    const findUserSql = "SELECT id FROM users WHERE email = ?";
-    db.query(findUserSql, [email], (err, userResults) => {
+    // 1. Check if the user exists (same LOWER(TRIM(email)) match as /api/login — see
+    // the comment in /api/verify-otp above for why this must stay consistent).
+    const findUserSql = "SELECT id FROM users WHERE LOWER(TRIM(email)) = ?";
+    db.query(findUserSql, [email.trim().toLowerCase()], (err, userResults) => {
         if (err) return res.status(500).json({ error: 'Internal server error.' });
         if (userResults.length === 0) return res.status(404).json({ error: 'No account found with this email.' });
 
